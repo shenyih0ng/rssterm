@@ -7,6 +7,7 @@ use ratatui::prelude::CrosstermBackend;
 use std::env::VarError;
 use std::error::Error;
 use std::io;
+use std::panic::{set_hook, take_hook};
 use std::path::{Path, PathBuf};
 
 mod app;
@@ -24,21 +25,27 @@ fn get_config_file() -> Result<PathBuf, VarError> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // set up terminal
     enable_raw_mode()?;
-    let mut io_stream = io::stdout();
-    execute!(io_stream, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(io_stream);
-    let mut terminal = Terminal::new(backend)?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    fn term_restore() -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen)?;
+        Ok(())
+    }
+
+    let default_panic_hook = take_hook();
+    set_hook(Box::new(move |panic_info| {
+        let _ = term_restore();
+        default_panic_hook(panic_info);
+    }));
 
     App::default()
         .run(&mut terminal, get_config_file()?)
         .await?;
 
-    // restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    term_restore()?;
 
     Ok(())
 }
