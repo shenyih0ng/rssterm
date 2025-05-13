@@ -149,25 +149,27 @@ impl FeedWidget {
             });
         }
 
-        let mut rss_items = Vec::new();
         while let Some(result) = query_set.join_next().await {
             match result {
                 Ok(Ok(rss_chan)) => {
-                    rss_items.extend(rss_chan.items().into_iter().map(|item| {
-                        FeedItem {
-                            title: item.title().unwrap_or("No Title 😢").to_string(),
-                            url: item.link().unwrap_or("No Link 😭").to_string(),
-                            pub_date: DateTime::parse_from_rfc2822(item.pub_date().unwrap())
-                                .unwrap()
-                                .into(),
-                        }
-                    }));
+                    self.state
+                        .write()
+                        .unwrap()
+                        .items
+                        .extend(rss_chan.items().into_iter().map(|item| {
+                            FeedItem {
+                                title: item.title().unwrap_or("No Title 😢").to_string(),
+                                url: item.link().unwrap_or("No Link 😭").to_string(),
+                                pub_date: DateTime::parse_from_rfc2822(item.pub_date().unwrap())
+                                    .unwrap()
+                                    .into(),
+                            }
+                        }))
                 }
                 Ok(Err(e)) => eprintln!("Feed fetch error: {}", e),
                 Err(e) => eprintln!("Task failed: {}", e),
             }
         }
-        self.state.write().unwrap().items = rss_items;
     }
 
     fn scroll_down(&self) {
