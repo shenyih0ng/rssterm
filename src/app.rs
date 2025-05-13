@@ -12,9 +12,12 @@ use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     prelude::Backend,
-    style::{Style, Stylize},
-    text::{Line, Span},
-    widgets::{Cell, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState, Widget},
+    style::{Color, Stylize},
+    text::{Line, Span, Text},
+    widgets::{
+        Cell, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Table, TableState, Widget,
+    },
 };
 use reqwest::Client;
 use rss::Channel;
@@ -89,9 +92,9 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(vec![Line::from(vec![
-                Span::styled(Self::NAME, Style::default().magenta()),
+                Span::raw(Self::NAME).magenta().bold(),
                 Span::raw(" "),
-                Span::styled(env!("CARGO_PKG_VERSION"), Style::default().dark_gray()),
+                Span::raw(env!("CARGO_PKG_VERSION")).dark_gray(),
             ])])
             .alignment(Alignment::Left),
             header_layout[0],
@@ -103,6 +106,7 @@ impl App {
                 .alignment(Alignment::Right),
             header_layout[1],
         );
+
         frame.render_widget(&self.feed, chunks[1]);
     }
 }
@@ -117,8 +121,10 @@ struct FeedWidget {
 struct FeedState {
     items: Vec<FeedItem>,
     table_state: TableState,
+    scroll_state: ScrollbarState,
 }
 
+#[derive(Clone)]
 struct FeedItem {
     title: String,
     url: String,
@@ -161,21 +167,23 @@ impl FeedWidget {
                 Err(e) => eprintln!("Task failed: {}", e),
             }
         }
-
-        let mut feed_state = self.state.write().unwrap();
-        feed_state.table_state = TableState::default();
-        if !rss_items.is_empty() {
-            feed_state.table_state.select(Some(0));
-        }
-        feed_state.items = rss_items;
+        self.state.write().unwrap().items = rss_items;
     }
 
     fn scroll_down(&self) {
-        self.state.write().unwrap().table_state.scroll_down_by(1);
+        let mut state = self.state.write().unwrap();
+        state.table_state.scroll_down_by(1);
+        state.scroll_state = state
+            .scroll_state
+            .position(state.table_state.selected().unwrap() * 4);
     }
 
     fn scroll_up(&self) {
-        self.state.write().unwrap().table_state.scroll_up_by(1);
+        let mut state = self.state.write().unwrap();
+        state.table_state.scroll_up_by(1);
+        state.scroll_state = state
+            .scroll_state
+            .position(state.table_state.selected().unwrap() * 4);
     }
 
     fn scroll_to_bottom(&self) {
@@ -200,27 +208,54 @@ impl Widget for &FeedWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut state = self.state.write().unwrap();
 
-        let table = Table::new(&state.items, [Constraint::Fill(1)])
-            .highlight_symbol(Line::from(">> ").style(Style::default().magenta()))
+        if state.table_state.selected().is_none() && !state.items.is_empty() {
+            state.table_state.select(Some(0));
+        }
+
+        let feed_items = state.items.clone();
+        let feed_rows: Vec<Row> = feed_items
+            .iter()
+            .enumerate()
+            .map(|(idx, feed_item)| {
+                let feed_item_text = feed_item.draw();
+                let feed_item_height = feed_item_text
+                    .height()
+                    .try_into()
+                    .unwrap_or(FeedItem::FALLBACK_HEIGHT);
+                Row::new(vec![Cell::new(feed_item_text)])
+                    .height(feed_item_height)
+                    .bottom_margin(if idx != (feed_items.len() - 1) { 1 } else { 0 })
+            })
+            .collect();
+
+        let feed_table = Table::new(feed_rows, [Constraint::Fill(1)])
+            .highlight_symbol(Line::from(">> ").magenta())
             .highlight_spacing(HighlightSpacing::Always);
 
-        StatefulWidget::render(table, area, buf, &mut state.table_state);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Color::DarkGray);
+        state.scroll_state = state.scroll_state.content_length(feed_items.len() * 4);
+
+        let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Length(3)]).split(area);
+        StatefulWidget::render(feed_table, layout[0], buf, &mut state.table_state);
+        StatefulWidget::render(scrollbar, layout[1], buf, &mut state.scroll_state);
     }
 }
 
-impl From<&FeedItem> for Row<'_> {
-    fn from(item: &FeedItem) -> Self {
-        Row::new(vec![Cell::new(vec![
-            Line::from(Span::styled(
-                item.title.clone(),
-                Style::default().blue().bold(),
-            )),
-            Line::from(Span::styled(item.url.clone(), Style::default().gray())),
-            Line::from(Span::styled(
-                item.pub_date.format("%-d-%b-%Y").to_string(),
-                Style::default().dark_gray(),
-            )),
-        ])])
-        .height(4)
+impl FeedItem {
+    const FALLBACK_HEIGHT: u16 = 4;
+
+    fn draw(&self) -> Text<'_> {
+        vec![
+            Line::from(self.title.clone()).blue().bold(),
+            Line::from(self.url.clone()).gray(),
+            Line::from(self.pub_date.format("%-d-%b-%Y").to_string()).dark_gray(),
+        ]
+        .into()
     }
 }
