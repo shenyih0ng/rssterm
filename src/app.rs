@@ -3,6 +3,8 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
+    usize::MAX,
+    vec,
 };
 
 use chrono::DateTime;
@@ -119,12 +121,18 @@ struct FeedWidget {
 
 #[derive(Default)]
 struct FeedState {
-    items: Vec<FeedItem>,
-    table_state: TableState,
-    scroll_state: ScrollbarState,
+    data: Vec<FeedItem>,
+    table: FeedTableState,
+    tui_scrollbar: ScrollbarState,
 }
 
-#[derive(Clone)]
+#[derive(Default)]
+struct FeedTableState {
+    row_heights: Vec<usize>, // TODO should be a cumulative sum?
+    tui_state: TableState,
+}
+
+#[derive(Clone, Default)]
 struct FeedItem {
     title: String,
     url: String,
@@ -155,11 +163,12 @@ impl FeedWidget {
                     self.state
                         .write()
                         .unwrap()
-                        .items
+                        .data
                         .extend(rss_chan.items().into_iter().map(|item| {
                             FeedItem {
                                 title: item.title().unwrap_or("No Title 😢").to_string(),
                                 url: item.link().unwrap_or("No Link 😭").to_string(),
+                                // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
                                 pub_date: DateTime::parse_from_rfc2822(item.pub_date().unwrap())
                                     .unwrap()
                                     .into(),
@@ -174,22 +183,36 @@ impl FeedWidget {
 
     fn scroll_down(&self) {
         let mut state = self.state.write().unwrap();
-        state.table_state.scroll_down_by(1);
-        state.scroll_state = state
-            .scroll_state
-            .position(state.table_state.selected().unwrap() * 4);
+        state.table.tui_state.scroll_down_by(1);
+        let selected_idx = state.table.tui_state.selected().unwrap();
+        state.tui_scrollbar = state.tui_scrollbar.position(
+            state
+                .table
+                .row_heights
+                .iter()
+                .take(selected_idx + 1)
+                .sum::<usize>(),
+        );
     }
 
     fn scroll_up(&self) {
         let mut state = self.state.write().unwrap();
-        state.table_state.scroll_up_by(1);
-        state.scroll_state = state
-            .scroll_state
-            .position(state.table_state.selected().unwrap() * 4);
+        state.table.tui_state.scroll_up_by(1);
+        let selected_idx = state.table.tui_state.selected().unwrap();
+        state.tui_scrollbar = state.tui_scrollbar.position(
+            state
+                .table
+                .row_heights
+                .iter()
+                .take(selected_idx)
+                .sum::<usize>(),
+        );
     }
 
     fn scroll_to_bottom(&self) {
-        self.state.write().unwrap().table_state.select_last();
+        let mut state = self.state.write().unwrap();
+        state.table.tui_state.select_last();
+        state.tui_scrollbar = state.tui_scrollbar.position(MAX);
     }
 }
 
@@ -209,28 +232,41 @@ impl Default for FeedWidget {
 impl Widget for &FeedWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut state = self.state.write().unwrap();
+        let data = state.data.clone();
 
-        if state.table_state.selected().is_none() && !state.items.is_empty() {
-            state.table_state.select(Some(0));
+        if state.table.tui_state.selected().is_none() && !data.is_empty() {
+            state.table.tui_state.select(Some(0));
         }
 
-        let feed_items = state.items.clone();
-        let feed_rows: Vec<Row> = feed_items
+        let mut tui_table_content_height = 0;
+        let (tui_rows, tui_row_heights): (Vec<Row>, Vec<usize>) = data
             .iter()
             .enumerate()
             .map(|(idx, feed_item)| {
-                let feed_item_text = feed_item.draw();
-                let feed_item_height = feed_item_text
-                    .height()
-                    .try_into()
-                    .unwrap_or(FeedItem::FALLBACK_HEIGHT);
-                Row::new(vec![Cell::new(feed_item_text)])
-                    .height(feed_item_height)
-                    .bottom_margin(if idx != (feed_items.len() - 1) { 1 } else { 0 })
-            })
-            .collect();
+                let tui_text = feed_item.draw();
+                let tui_text_height = tui_text.height();
 
-        let feed_table = Table::new(feed_rows, [Constraint::Fill(1)])
+                let is_last_row = idx == data.len().saturating_sub(1);
+                let tui_row_btm_margin = (!is_last_row) as usize;
+
+                let tui_row_total_height = tui_text_height + tui_row_btm_margin;
+                tui_table_content_height += tui_row_total_height;
+
+                (
+                    Row::new(vec![Cell::new(tui_text)])
+                        .height(tui_text_height as u16)
+                        .bottom_margin(tui_row_btm_margin as u16),
+                    tui_row_total_height,
+                )
+            })
+            .unzip();
+
+        state.tui_scrollbar = state
+            .tui_scrollbar
+            .content_length(tui_table_content_height as usize);
+        state.table.row_heights = tui_row_heights;
+
+        let feed_table = Table::new(tui_rows, [Constraint::Fill(1)])
             .highlight_symbol(Line::from(">> ").magenta())
             .highlight_spacing(HighlightSpacing::Always);
 
@@ -241,17 +277,14 @@ impl Widget for &FeedWidget {
             .track_symbol(None)
             .thumb_symbol("▐")
             .thumb_style(Color::DarkGray);
-        state.scroll_state = state.scroll_state.content_length(feed_items.len() * 4);
 
         let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Length(3)]).split(area);
-        StatefulWidget::render(feed_table, layout[0], buf, &mut state.table_state);
-        StatefulWidget::render(scrollbar, layout[1], buf, &mut state.scroll_state);
+        StatefulWidget::render(feed_table, layout[0], buf, &mut state.table.tui_state);
+        StatefulWidget::render(scrollbar, layout[1], buf, &mut state.tui_scrollbar);
     }
 }
 
 impl FeedItem {
-    const FALLBACK_HEIGHT: u16 = 4;
-
     fn draw(&self) -> Text<'_> {
         vec![
             Line::from(self.title.clone()).blue().bold(),
