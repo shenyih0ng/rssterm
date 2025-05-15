@@ -11,3 +11,4 @@ ratatui = "0.29.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 tokio-stream = "0.1.17"
 chrono = "0.4.41"
+textwrap = "0.16.2"

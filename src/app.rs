@@ -23,6 +23,7 @@ use ratatui::{
 };
 use reqwest::Client;
 use rss::Channel;
+use textwrap::{Options, wrap};
 use tokio::{fs, task::JoinSet};
 use tokio_stream::StreamExt;
 
@@ -140,6 +141,7 @@ struct FeedItem {
 }
 
 impl FeedWidget {
+    const FEED_HIGHLIGHT_SYMBOL: &str = ">> ";
     const HTTP_USER_AGENT: &str = "i read rss feeds on the terminal btw"; // iusevimbtw.com
 
     fn run(&self, chan_urls: Vec<String>) {
@@ -231,6 +233,17 @@ impl Default for FeedWidget {
 
 impl Widget for &FeedWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let [tui_table_area, tui_scrollbar_area] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+
+        let tui_table_col_layout = [Constraint::Fill(0)];
+        let tui_table_hl_symbol_len = FeedWidget::FEED_HIGHLIGHT_SYMBOL.len() as u16;
+        let tui_table_col_areas = Layout::horizontal(tui_table_col_layout).split(Rect {
+            x: tui_table_area.x + tui_table_hl_symbol_len,
+            width: tui_table_area.width.saturating_sub(tui_table_hl_symbol_len),
+            ..tui_table_area
+        });
+
         let mut state = self.state.write().unwrap();
         let data = state.data.clone();
 
@@ -243,7 +256,7 @@ impl Widget for &FeedWidget {
             .iter()
             .enumerate()
             .map(|(idx, feed_item)| {
-                let tui_text = feed_item.draw();
+                let tui_text = feed_item.draw(Some(tui_table_col_areas[0].width as usize));
                 let tui_text_height = tui_text.height();
 
                 let is_last_row = idx == data.len().saturating_sub(1);
@@ -266,8 +279,8 @@ impl Widget for &FeedWidget {
             .content_length(tui_table_content_height as usize);
         state.table.row_heights = tui_row_heights;
 
-        let feed_table = Table::new(tui_rows, [Constraint::Fill(1)])
-            .highlight_symbol(Line::from(">> ").magenta())
+        let feed_table = Table::new(tui_rows, tui_table_col_layout)
+            .highlight_symbol(Line::from(FeedWidget::FEED_HIGHLIGHT_SYMBOL).magenta())
             .highlight_spacing(HighlightSpacing::Always);
 
         let scrollbar = Scrollbar::default()
@@ -278,19 +291,27 @@ impl Widget for &FeedWidget {
             .thumb_symbol("▐")
             .thumb_style(Color::DarkGray);
 
-        let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Length(3)]).split(area);
-        StatefulWidget::render(feed_table, layout[0], buf, &mut state.table.tui_state);
-        StatefulWidget::render(scrollbar, layout[1], buf, &mut state.tui_scrollbar);
+        StatefulWidget::render(feed_table, tui_table_area, buf, &mut state.table.tui_state);
+        StatefulWidget::render(scrollbar, tui_scrollbar_area, buf, &mut state.tui_scrollbar);
     }
 }
 
 impl FeedItem {
-    fn draw(&self) -> Text<'_> {
-        vec![
-            Line::from(self.title.clone()).blue().bold(),
+    fn draw(&self, width: Option<usize>) -> Text<'_> {
+        let title_lines = wrap(
+            &self.title,
+            Options::new(width.unwrap_or(usize::MAX)).break_words(true),
+        )
+        .iter()
+        .map(|line| Line::from(line.to_string()).blue().bold())
+        .collect::<Vec<_>>();
+
+        let mut lines = title_lines;
+        lines.extend(vec![
             Line::from(self.url.clone()).gray(),
             Line::from(self.pub_date.format("%-d-%b-%Y").to_string()).dark_gray(),
-        ]
-        .into()
+        ]);
+
+        lines.into()
     }
 }
