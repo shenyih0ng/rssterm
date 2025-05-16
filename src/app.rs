@@ -36,7 +36,6 @@ pub struct App {
 }
 
 impl App {
-    const NAME: &str = "rssterm";
     const FRAMES_PER_SECOND: f32 = 60.0;
 
     pub async fn run<B: Backend>(
@@ -95,7 +94,7 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(vec![Line::from(vec![
-                Span::raw(Self::NAME).magenta().bold(),
+                Span::raw(env!("CARGO_PKG_NAME")).magenta().bold(),
                 Span::raw(" "),
                 Span::raw(env!("CARGO_PKG_VERSION")).dark_gray(),
             ])])
@@ -142,7 +141,7 @@ struct FeedItem {
 
 impl FeedWidget {
     const FEED_HIGHLIGHT_SYMBOL: &str = ">> ";
-    const HTTP_USER_AGENT: &str = "i read rss feeds on the terminal btw"; // iusevimbtw.com
+    const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
     fn run(&self, chan_urls: Vec<String>) {
         tokio::spawn(self.clone().fetch_feed(chan_urls));
