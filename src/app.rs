@@ -82,16 +82,16 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        let chunks = Layout::default()
+        let [header_area, main_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Fill(1)])
-            .split(frame.area());
+            .areas(frame.area());
 
-        let header_layout = Layout::default()
+        let [title_area, time_area] = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(30), Constraint::Length(30)])
             .flex(Flex::SpaceBetween)
-            .split(chunks[0]);
+            .areas(header_area);
 
         frame.render_widget(
             Paragraph::new(vec![Line::from(vec![
@@ -100,17 +100,17 @@ impl App {
                 Span::raw(env!("CARGO_PKG_VERSION")).dark_gray(),
             ])])
             .alignment(Alignment::Left),
-            header_layout[0],
+            title_area,
         );
 
         frame.render_widget(
             Paragraph::new(chrono::Local::now().format("%H:%M:%S / %a %v").to_string())
                 .dark_gray()
                 .alignment(Alignment::Right),
-            header_layout[1],
+            time_area,
         );
 
-        frame.render_widget(&self.feed, chunks[1]);
+        frame.render_widget(&self.feed, main_area);
     }
 }
 
