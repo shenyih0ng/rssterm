@@ -1,4 +1,5 @@
 use std::{
+    cmp::max,
     error::Error,
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -8,6 +9,7 @@ use std::{
 };
 
 use chrono::DateTime;
+use chrono_humanize::HumanTime;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
@@ -15,7 +17,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     prelude::Backend,
     style::{Color, Stylize},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         Cell, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
         StatefulWidget, Table, TableState, Widget,
@@ -141,6 +143,7 @@ struct FeedItem {
 
 impl FeedWidget {
     const FEED_HIGHLIGHT_SYMBOL: &str = ">> ";
+    const FEED_COLUMN_SPACING: u16 = 2;
     const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
     fn run(&self, chan_urls: Vec<String>) {
@@ -233,13 +236,15 @@ impl Default for FeedWidget {
 impl Widget for &FeedWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [tui_table_area, tui_scrollbar_area] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
 
-        let tui_table_col_layout = [Constraint::Fill(0)];
+        let tui_table_col_layout = [Constraint::Fill(0), Constraint::Percentage(20)];
         let tui_table_hl_symbol_len = FeedWidget::FEED_HIGHLIGHT_SYMBOL.len() as u16;
         let tui_table_col_areas = Layout::horizontal(tui_table_col_layout).split(Rect {
             x: tui_table_area.x + tui_table_hl_symbol_len,
-            width: tui_table_area.width.saturating_sub(tui_table_hl_symbol_len),
+            width: tui_table_area
+                .width
+                .saturating_sub(tui_table_hl_symbol_len + FeedWidget::FEED_COLUMN_SPACING),
             ..tui_table_area
         });
 
@@ -255,20 +260,17 @@ impl Widget for &FeedWidget {
             .iter()
             .enumerate()
             .map(|(idx, feed_item)| {
-                let tui_text = feed_item.draw(Some(tui_table_col_areas[0].width as usize));
-                let tui_text_height = tui_text.height();
+                let (tui_row, tui_row_height) = feed_item.draw(&tui_table_col_areas);
 
                 let is_last_row = idx == data.len().saturating_sub(1);
-                let tui_row_btm_margin = (!is_last_row) as usize;
+                let tui_row_btm_margin = (!is_last_row) as u16;
 
-                let tui_row_total_height = tui_text_height + tui_row_btm_margin;
+                let tui_row_total_height = tui_row_height + tui_row_btm_margin;
                 tui_table_content_height += tui_row_total_height;
 
                 (
-                    Row::new(vec![Cell::new(tui_text)])
-                        .height(tui_text_height as u16)
-                        .bottom_margin(tui_row_btm_margin as u16),
-                    tui_row_total_height,
+                    tui_row.bottom_margin(tui_row_btm_margin),
+                    tui_row_total_height as usize,
                 )
             })
             .unzip();
@@ -280,7 +282,8 @@ impl Widget for &FeedWidget {
 
         let feed_table = Table::new(tui_rows, tui_table_col_layout)
             .highlight_symbol(Line::from(FeedWidget::FEED_HIGHLIGHT_SYMBOL).magenta())
-            .highlight_spacing(HighlightSpacing::Always);
+            .highlight_spacing(HighlightSpacing::Always)
+            .column_spacing(FeedWidget::FEED_COLUMN_SPACING);
 
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
@@ -296,21 +299,47 @@ impl Widget for &FeedWidget {
 }
 
 impl FeedItem {
-    fn draw(&self, width: Option<usize>) -> Text<'_> {
-        let title_lines = wrap(
-            &self.title,
-            Options::new(width.unwrap_or(usize::MAX)).break_words(true),
+    fn draw(&self, col_areas: &[Rect]) -> (Row<'_>, u16) {
+        let wrapped_texts: Vec<Vec<String>> = col_areas
+            .iter()
+            .zip([
+                self.title.clone(),
+                HumanTime::from(self.pub_date).to_string(),
+            ])
+            .map(|(col_area, text)| {
+                wrap(
+                    &text,
+                    Options::new(col_area.width as usize).break_words(true),
+                )
+                .into_iter()
+                .map(|line| line.into_owned())
+                .collect::<Vec<String>>()
+            })
+            .collect();
+
+        let content_lines = [
+            wrapped_texts[0]
+                .iter()
+                .map(|line| Line::from(line.clone()).white().bold())
+                .collect::<Vec<_>>(),
+            vec![Line::from(self.url.clone()).dark_gray()],
+        ]
+        .concat();
+
+        let pub_date_lines = wrapped_texts[1]
+            .iter()
+            .map(|line| {
+                Line::from(line.clone())
+                    .light_blue()
+                    .italic()
+                    .alignment(Alignment::Right)
+            })
+            .collect::<Vec<_>>();
+
+        let row_height = max(content_lines.len(), pub_date_lines.len()) as u16;
+        (
+            Row::new(vec![Cell::new(content_lines), Cell::new(pub_date_lines)]).height(row_height),
+            row_height,
         )
-        .iter()
-        .map(|line| Line::from(line.to_string()).blue().bold())
-        .collect::<Vec<_>>();
-
-        let mut lines = title_lines;
-        lines.extend(vec![
-            Line::from(self.url.clone()).gray(),
-            Line::from(self.pub_date.format("%-d-%b-%Y").to_string()).dark_gray(),
-        ]);
-
-        lines.into()
     }
 }
