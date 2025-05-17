@@ -37,11 +37,15 @@ use crate::{
     utils::{parse_html_or, wrap_then_apply},
 };
 
+use crate::debug::FpsWidget;
+
 pub struct App {
     // app state
     should_quit: bool,
     // widgets
     feed: FeedWidget,
+    // perf/debug widgets
+    fps: Option<FpsWidget>,
 
     app_event_rx: Receiver<AppEvent>,
 }
@@ -52,6 +56,7 @@ impl Default for App {
         Self {
             should_quit: false,
             feed: FeedWidget::new(app_event_tx.clone()),
+            fps: None,
             app_event_rx,
         }
     }
@@ -62,8 +67,13 @@ impl App {
         mut self,
         terminal: &mut Terminal<B>,
         config_file: PathBuf,
-        fps: f32,
+        tick_rate: Duration,
+        show_fps: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if show_fps {
+            self.fps = Some(FpsWidget::default());
+        }
+
         self.feed.run(
             fs::read_to_string(config_file)
                 .await
@@ -71,16 +81,14 @@ impl App {
                 .unwrap_or(Vec::new()),
         );
 
-        let mut tick_rate = tokio::time::interval(Duration::from_secs_f32(1.0 / fps));
+        let mut tick_rate = tokio::time::interval(tick_rate);
         let mut term_events = EventStream::new();
 
         while !self.should_quit {
             tokio::select! {
                 _ = tick_rate.tick() => { terminal.draw(|frame| self.draw(frame))?; }
                 Some(Ok(term_event)) = term_events.next() => self.handle_term_event(&term_event).await,
-                Some(AppEvent::Exit) = self.app_event_rx.recv() => {
-                    self.should_quit = true;
-                }
+                Some(AppEvent::Exit) = self.app_event_rx.recv() => self.should_quit = true
             }
         }
 
@@ -99,9 +107,7 @@ impl App {
                 // Since there is only one active widget (`FeedWidget`), we can directly dispatch all
                 // non-exit events to it. When more widgets are added, we will need to identify which
                 // widget is active and dispatch the event accordingly.
-                _ => {
-                    self.feed.handle_event(app_event).await;
-                }
+                _ => self.feed.handle_event(app_event).await,
             }
         }
     }
@@ -130,7 +136,9 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let [header_area, main_area] = vertical![==2, *=1].areas(frame.area());
+        let [header_area, main_area, fps_area] =
+            vertical![==2, *=1, ==(self.fps.is_some() as u16)].areas(frame.area());
+
         let [title_area, time_area] = horizontal![==30, ==30]
             .flex(Flex::SpaceBetween)
             .areas(header_area);
@@ -157,6 +165,10 @@ impl App {
         );
 
         self.feed.render(frame, main_area);
+
+        if let Some(fps_widget) = &mut self.fps {
+            fps_widget.render(fps_area, frame.buffer_mut());
+        }
     }
 }
 

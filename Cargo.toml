@@ -18,3 +18,4 @@ html2text = "0.15.0"
 ratatui-macros = "0.6.0"
 itertools = "0.14.0"
 tui-scrollview = "0.5.1"
+clap = { version = "4.5.38", features = ["derive"] }
