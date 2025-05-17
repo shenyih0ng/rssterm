@@ -1,10 +1,9 @@
 use std::{
-    cmp::max,
+    cmp::{max, min},
     error::Error,
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
-    usize::MAX,
     vec,
 };
 
@@ -73,9 +72,9 @@ impl App {
                     (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
                         self.should_quit = true;
                     }
-                    (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.scroll_up(),
-                    (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.scroll_down(),
-                    (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.scroll_to_bottom(),
+                    (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.scroll(1, false),
+                    (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.scroll(1, true),
+                    (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.scroll(u16::MAX, true),
                     _ => {}
                 }
             }
@@ -130,7 +129,7 @@ struct FeedState {
 
 #[derive(Default)]
 struct FeedTableState {
-    row_heights: Vec<usize>, // TODO should be a cumulative sum?
+    row_heights_cum: Vec<usize>,
     tui_state: TableState,
 }
 
@@ -189,38 +188,28 @@ impl FeedWidget {
         }
     }
 
-    fn scroll_down(&self) {
+    fn scroll(&self, delta: u16, is_down: bool) {
         let mut state = self.state.write().unwrap();
-        state.table.tui_state.scroll_down_by(1);
-        let selected_idx = state.table.tui_state.selected().unwrap();
+        if is_down {
+            state.table.tui_state.scroll_down_by(delta);
+        } else {
+            state.table.tui_state.scroll_up_by(delta);
+        }
+        // NOTE: The range of selected_idx is [0, data.len() - 1]
+        // This is likely to allow developers to catch overflow events to handle wrap arounds
+        // Currently, we are not allowing wrap arounds, hence we are clamping the value
+        let selected_idx = min(
+            state.table.tui_state.selected().unwrap(),
+            state.data.len().saturating_sub(1),
+        );
         state.tui_scrollbar = state.tui_scrollbar.position(
             state
                 .table
-                .row_heights
-                .iter()
-                .take(selected_idx + 1)
-                .sum::<usize>(),
+                .row_heights_cum
+                .get(selected_idx.saturating_sub(1))
+                .unwrap_or(&0)
+                * min(selected_idx, 1),
         );
-    }
-
-    fn scroll_up(&self) {
-        let mut state = self.state.write().unwrap();
-        state.table.tui_state.scroll_up_by(1);
-        let selected_idx = state.table.tui_state.selected().unwrap();
-        state.tui_scrollbar = state.tui_scrollbar.position(
-            state
-                .table
-                .row_heights
-                .iter()
-                .take(selected_idx)
-                .sum::<usize>(),
-        );
-    }
-
-    fn scroll_to_bottom(&self) {
-        let mut state = self.state.write().unwrap();
-        state.table.tui_state.select_last();
-        state.tui_scrollbar = state.tui_scrollbar.position(MAX);
     }
 }
 
@@ -260,7 +249,7 @@ impl Widget for &FeedWidget {
         }
 
         let mut tui_table_content_height = 0;
-        let (tui_rows, tui_row_heights): (Vec<Row>, Vec<usize>) = data
+        let (tui_rows, tui_cum_row_heights): (Vec<Row>, Vec<usize>) = data
             .iter()
             .enumerate()
             .map(|(idx, feed_item)| {
@@ -274,7 +263,7 @@ impl Widget for &FeedWidget {
 
                 (
                     tui_row.bottom_margin(tui_row_btm_margin),
-                    tui_row_total_height as usize,
+                    tui_table_content_height as usize,
                 )
             })
             .unzip();
@@ -282,7 +271,7 @@ impl Widget for &FeedWidget {
         state.tui_scrollbar = state
             .tui_scrollbar
             .content_length(tui_table_content_height as usize);
-        state.table.row_heights = tui_row_heights;
+        state.table.row_heights_cum = tui_cum_row_heights;
 
         let feed_table = Table::new(tui_rows, tui_table_col_layout)
             .highlight_symbol(Line::from(FeedWidget::FEED_HIGHLIGHT_SYMBOL).magenta())
