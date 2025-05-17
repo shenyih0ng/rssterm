@@ -24,7 +24,7 @@ use ratatui::{
     },
 };
 use reqwest::Client;
-use rss::Channel;
+use rss::{Channel, Item};
 use textwrap::{Options, wrap};
 use tokio::{fs, task::JoinSet};
 use tokio_stream::StreamExt;
@@ -141,6 +141,19 @@ struct FeedItem {
     pub_date: DateTime<chrono::Local>,
 }
 
+impl FeedItem {
+    fn from_rss_item(item: &Item) -> Option<Self> {
+        let pub_date = item.pub_date()?;
+        // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
+        let parsed_date = DateTime::parse_from_rfc2822(pub_date).ok()?;
+        Some(Self {
+            title: item.title().unwrap_or("No Title 😢").to_string(),
+            url: item.link().unwrap_or("No Link 😭").to_string(),
+            pub_date: parsed_date.into(),
+        })
+    }
+}
+
 impl FeedWidget {
     const FEED_HIGHLIGHT_SYMBOL: &str = ">> ";
     const FEED_COLUMN_SPACING: u16 = 2;
@@ -164,20 +177,11 @@ impl FeedWidget {
         while let Some(result) = query_set.join_next().await {
             match result {
                 Ok(Ok(rss_chan)) => {
-                    self.state
-                        .write()
-                        .unwrap()
+                    let mut state = self.state.write().unwrap();
+                    state
                         .data
-                        .extend(rss_chan.items().into_iter().map(|item| {
-                            FeedItem {
-                                title: item.title().unwrap_or("No Title 😢").to_string(),
-                                url: item.link().unwrap_or("No Link 😭").to_string(),
-                                // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
-                                pub_date: DateTime::parse_from_rfc2822(item.pub_date().unwrap())
-                                    .unwrap()
-                                    .into(),
-                            }
-                        }))
+                        .extend(rss_chan.items().iter().filter_map(FeedItem::from_rss_item));
+                    state.data.sort_by(|a, b| b.pub_date.cmp(&a.pub_date));
                 }
                 Ok(Err(e)) => eprintln!("Feed fetch error: {}", e),
                 Err(e) => eprintln!("Task failed: {}", e),
