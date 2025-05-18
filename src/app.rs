@@ -69,11 +69,11 @@ impl App {
         if let Event::Key(key) = event {
             if key.kind == KeyEventKind::Press {
                 match (key.modifiers, key.code) {
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
-                        self.should_quit = true;
-                    }
                     (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.scroll(1, false),
                     (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.scroll(1, true),
+                    (_, KeyCode::Enter) => self.feed.open_selected(),
+                    #[rustfmt::skip]
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => { self.should_quit = true;}
                     (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.scroll(u16::MAX, true),
                     _ => {}
                 }
@@ -210,6 +210,21 @@ impl FeedWidget {
                 .unwrap_or(&0)
                 * min(selected_idx, 1),
         );
+    }
+
+    fn open_selected(&self) {
+        let state = self.state.read().unwrap();
+        match state.table.tui_state.selected() {
+            Some(idx) => {
+                let selected_idx = min(idx, state.data.len().saturating_sub(1));
+                match state.data.get(selected_idx) {
+                    Some(feed_item) => open::that(feed_item.url.clone())
+                        .unwrap_or_else(|e| eprintln!("Failed to open URL: {}", e)),
+                    None => eprintln!("No item selected"),
+                }
+            }
+            _ => eprintln!("No item selected"),
+        }
     }
 }
 
