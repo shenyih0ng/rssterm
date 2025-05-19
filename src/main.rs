@@ -11,8 +11,11 @@ use std::panic::{set_hook, take_hook};
 use std::path::{Path, PathBuf};
 
 mod app;
+mod utils;
 
 use crate::app::App;
+
+const DEFAULT_FPS: f32 = 60.0;
 
 fn get_config_file() -> Result<PathBuf, VarError> {
     let config_file = if let Ok(env_file_path) = std::env::var("RSSTERM_CONFIG") {
@@ -42,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }));
 
     App::default()
-        .run(&mut terminal, get_config_file()?)
+        .run(&mut terminal, get_config_file()?, DEFAULT_FPS)
         .await?;
 
     term_restore()?;
