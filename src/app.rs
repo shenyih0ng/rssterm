@@ -12,15 +12,16 @@ use chrono_humanize::HumanTime;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Margin, Rect},
+    layout::{Alignment, Flex, Layout, Margin, Rect},
     prelude::Backend,
     style::{Color, Stylize},
-    text::{Line, Span},
+    text::Line,
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row,
-        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Widget, Wrap,
+        Block, BorderType, Borders, Clear, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table, TableState, Widget, Wrap,
     },
 };
+use ratatui_macros::{constraints, horizontal, line, row, span, vertical};
 use reqwest::Client;
 use rss::{Channel, Item};
 use tokio::{fs, task::JoinSet};
@@ -90,23 +91,17 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let [header_area, main_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Fill(1)])
-            .areas(frame.area());
-
-        let [title_area, time_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(30), Constraint::Length(30)])
+        let [header_area, main_area] = vertical![==2, *=1].areas(frame.area());
+        let [title_area, time_area] = horizontal![==30, ==30]
             .flex(Flex::SpaceBetween)
             .areas(header_area);
 
         frame.render_widget(
-            Paragraph::new(vec![Line::from(vec![
-                Span::raw(env!("CARGO_PKG_NAME")).magenta().bold(),
-                Span::raw(" "),
-                Span::raw(env!("CARGO_PKG_VERSION")).dark_gray(),
-            ])])
+            Paragraph::new(line![
+                span!(env!("CARGO_PKG_NAME")).magenta().bold(),
+                span!(" "),
+                span!(env!("CARGO_PKG_VERSION")).dark_gray(),
+            ])
             .alignment(Alignment::Left),
             title_area,
         );
@@ -247,13 +242,12 @@ impl FeedWidget {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let [tb_area, sb_area] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+        let [tb_area, sb_area] = horizontal![*=1, ==2].areas(area);
 
         let tb_col_spacing = 2;
         let tb_highlight_symbol = ">> ";
         // Dynamically calculate the rendered width of each table column, required for text wrapping
-        let tb_col_layout = [Constraint::Fill(0), Constraint::Percentage(20)];
+        let tb_col_layout = constraints![*=0, ==20%];
         let tb_hl_symbol_len = tb_highlight_symbol.len() as u16;
         let tb_col_areas: [Rect; 2] = Layout::horizontal(tb_col_layout).areas(Rect {
             x: tb_area.x + tb_hl_symbol_len,
@@ -318,15 +312,15 @@ impl FeedWidget {
 impl FeedItem {
     fn draw_row(&self, col_areas: &[Rect; 2]) -> (Row<'_>, u16) {
         let w_title = wrap_then_apply(&self.title, col_areas[0].width as usize, |line| {
-            Line::from(line).white().bold()
+            line!(line).white().bold()
         });
-        let content_lines = [w_title, vec![Line::from(self.url.clone()).dark_gray()]].concat();
+        let content_lines = [w_title, vec![line!(self.url.clone()).dark_gray()]].concat();
 
         let w_pub_date = wrap_then_apply(
             &HumanTime::from(self.pub_date).to_string(),
             col_areas[1].width as usize,
             |line| {
-                Line::from(line)
+                line!(line)
                     .light_blue()
                     .italic()
                     .alignment(Alignment::Right)
@@ -335,7 +329,7 @@ impl FeedItem {
 
         let row_height = max(content_lines.len(), w_pub_date.len()) as u16;
         (
-            Row::new(vec![Cell::new(content_lines), Cell::new(w_pub_date)]).height(row_height),
+            row![content_lines, w_pub_date].height(row_height),
             row_height,
         )
     }
@@ -353,25 +347,17 @@ impl FeedItem {
             });
 
         let content_area = outer_block.inner(area);
-        let content_layout: [Rect; 2] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(5), Constraint::Fill(0)])
-            .areas(content_area);
+        let content_layout: [Rect; 2] = vertical![==5%, *=0].areas(content_area);
 
         let mut overview_lines = vec![
-            Line::from(self.title.clone()).white().bold(),
-            Line::from(self.pub_date.format("%H:%M:%S / %e-%b-%Y [%a]").to_string())
+            line!(self.title.clone()).white().bold(),
+            line!(self.pub_date.format("%H:%M:%S / %e-%b-%Y [%a]").to_string())
                 .light_blue()
                 .italic(),
         ];
         if let Some(author) = &self.author {
-            overview_lines.push(
-                Line::from(vec![
-                    Span::raw("by ").dark_gray(),
-                    Span::raw(author).light_green(),
-                ])
-                .italic(),
-            )
+            overview_lines
+                .push(line![span!("by ").dark_gray(), span!(author).light_green()].italic())
         }
         let overview_content = Paragraph::new(overview_lines).wrap(Wrap { trim: true });
 
