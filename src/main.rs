@@ -11,6 +11,7 @@ use std::panic::{set_hook, take_hook};
 use std::path::{Path, PathBuf};
 
 mod app;
+mod event;
 mod utils;
 
 use crate::app::App;

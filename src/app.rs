@@ -12,13 +12,13 @@ use chrono_humanize::HumanTime;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Margin, Rect},
     prelude::Backend,
     style::{Color, Stylize},
     text::{Line, Span},
     widgets::{
-        Cell, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Table, TableState,
+        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Widget, Wrap,
     },
 };
 use reqwest::Client;
@@ -26,7 +26,7 @@ use rss::{Channel, Item};
 use tokio::{fs, task::JoinSet};
 use tokio_stream::StreamExt;
 
-use crate::utils::wrap_then_apply;
+use crate::{event::AppEvent, utils::wrap_then_apply};
 
 #[derive(Default)]
 pub struct App {
@@ -66,13 +66,23 @@ impl App {
     fn handle_event(&mut self, event: &Event) {
         if let Event::Key(key) = event {
             if key.kind == KeyEventKind::Press {
+                // Since there is only one active widget (`FeedWidget`), we can directly dispatch all
+                // non-quit events to it. When more widgets are added, we will need to identify which
+                // widget is active and dispatch the event accordingly.
                 match (key.modifiers, key.code) {
-                    (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.scroll(-1),
-                    (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.scroll(1),
-                    (_, KeyCode::Enter) => self.feed.open_selected(),
                     #[rustfmt::skip]
-                        (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => { self.should_quit = true;}
-                    (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.scroll(isize::MAX),
+                    (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.handle_event(AppEvent::Scroll(-1)),
+                    #[rustfmt::skip]
+                    (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.handle_event(AppEvent::Scroll(1)),
+                    #[rustfmt::skip]
+                    (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.handle_event(AppEvent::Scroll(isize::MAX)),
+                    (_, KeyCode::Enter) => self.feed.handle_event(AppEvent::Open),
+                    (_, KeyCode::Char('o')) => self.feed.handle_event(AppEvent::Expand),
+                    (_, KeyCode::Char('q') | KeyCode::Esc) => {
+                        self.feed.handle_event(AppEvent::Collapse)
+                    }
+                    #[rustfmt::skip]
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => { self.should_quit = true;}
                     _ => {}
                 }
             }
@@ -102,9 +112,13 @@ impl App {
         );
 
         frame.render_widget(
-            Paragraph::new(chrono::Local::now().format("%H:%M:%S / %a %v").to_string())
-                .dark_gray()
-                .alignment(Alignment::Right),
+            Paragraph::new(
+                chrono::Local::now()
+                    .format("%H:%M:%S / %e-%b-%Y [%a]")
+                    .to_string(),
+            )
+            .dark_gray()
+            .alignment(Alignment::Right),
             time_area,
         );
 
@@ -121,6 +135,8 @@ struct FeedWidget {
     // Cumulative rendered height of each row in the table
     tb_cum_row_heights: Vec<usize>,
     sb_state: ScrollbarState,
+
+    expanded_idx: Option<usize>,
 }
 
 #[derive(Default)]
@@ -140,6 +156,7 @@ impl Default for FeedWidget {
             tb_state: TableState::default(),
             tb_cum_row_heights: Vec::new(),
             sb_state: ScrollbarState::default(),
+            expanded_idx: None,
         }
     }
 }
@@ -176,7 +193,21 @@ impl FeedWidget {
         }
     }
 
+    fn handle_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Scroll(delta) => self.scroll(delta),
+            AppEvent::Expand => self.expanded_idx = self.tb_state.selected(),
+            AppEvent::Collapse => self.expanded_idx = None,
+            AppEvent::Open => self.open_selected(),
+        }
+    }
+
     fn scroll(&mut self, delta: isize) {
+        // If there is an expanded item, we don't want to scroll the table
+        if self.expanded_idx.is_some() {
+            return;
+        }
+
         let abs_scroll_delta = delta.abs() as u16;
         if delta < 0 {
             self.tb_state.scroll_up_by(abs_scroll_delta);
@@ -224,7 +255,7 @@ impl FeedWidget {
         // Dynamically calculate the rendered width of each table column, required for text wrapping
         let tb_col_layout = [Constraint::Fill(0), Constraint::Percentage(20)];
         let tb_hl_symbol_len = tb_highlight_symbol.len() as u16;
-        let tb_col_areas = Layout::horizontal(tb_col_layout).split(Rect {
+        let tb_col_areas: [Rect; 2] = Layout::horizontal(tb_col_layout).areas(Rect {
             x: tb_area.x + tb_hl_symbol_len,
             width: tb_area
                 .width
@@ -240,7 +271,7 @@ impl FeedWidget {
             .iter()
             .enumerate()
             .map(|(idx, feed_item)| {
-                let (tb_row, tb_row_h) = feed_item.draw(&tb_col_areas);
+                let (tb_row, tb_row_h) = feed_item.draw_row(&tb_col_areas);
                 let tb_row_btm_margin = (!(idx == feed_items.len().saturating_sub(1))) as u16;
                 let tb_row_total_h = tb_row_h + tb_row_btm_margin;
                 tbl_total_content_height += tb_row_total_h as usize;
@@ -272,11 +303,20 @@ impl FeedWidget {
 
         frame.render_stateful_widget(table, tb_area, &mut self.tb_state);
         frame.render_stateful_widget(scrollbar, sb_area, &mut self.sb_state);
+
+        if self.expanded_idx.is_some() {
+            let popup_area = area.inner(Margin {
+                vertical: area.height / 16,
+                horizontal: area.width / 16,
+            });
+            Clear.render(popup_area, frame.buffer_mut());
+            feed_items[self.expanded_idx.unwrap()].render(frame, popup_area);
+        }
     }
 }
 
 impl FeedItem {
-    fn draw(&self, col_areas: &[Rect]) -> (Row<'_>, u16) {
+    fn draw_row(&self, col_areas: &[Rect; 2]) -> (Row<'_>, u16) {
         let w_title = wrap_then_apply(&self.title, col_areas[0].width as usize, |line| {
             Line::from(line).white().bold()
         });
@@ -299,24 +339,81 @@ impl FeedItem {
             row_height,
         )
     }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        let outer_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Color::LightMagenta)
+            .padding(Padding {
+                left: 2,
+                right: 2,
+                top: 1,
+                bottom: 1,
+            });
+
+        let content_area = outer_block.inner(area);
+        let content_layout: [Rect; 2] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(5), Constraint::Fill(0)])
+            .areas(content_area);
+
+        let mut overview_lines = vec![
+            Line::from(self.title.clone()).white().bold(),
+            Line::from(self.pub_date.format("%H:%M:%S / %e-%b-%Y [%a]").to_string())
+                .light_blue()
+                .italic(),
+        ];
+        if let Some(author) = &self.author {
+            overview_lines.push(
+                Line::from(vec![
+                    Span::raw("by ").dark_gray(),
+                    Span::raw(author).light_green(),
+                ])
+                .italic(),
+            )
+        }
+        let overview_content = Paragraph::new(overview_lines).wrap(Wrap { trim: true });
+
+        let desc_block = Block::default().padding(Padding::vertical(1));
+        let desc_content = Paragraph::new(self.description.clone().unwrap_or_default())
+            .wrap(Wrap { trim: true })
+            .block(desc_block);
+
+        frame.render_widget(outer_block, area);
+        frame.render_widget(overview_content, content_layout[0]);
+        frame.render_widget(desc_content, content_layout[1]);
+    }
 }
 
 #[derive(Clone, Default)]
 struct FeedItem {
     title: String,
     url: String,
+    author: Option<String>,
+    description: Option<String>,
     pub_date: DateTime<chrono::Local>,
 }
 
 impl FeedItem {
     fn from_rss_item(item: &Item) -> Option<Self> {
-        let pub_date = item.pub_date()?;
-        // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
-        let parsed_date = DateTime::parse_from_rfc2822(pub_date).ok()?;
         Some(Self {
             title: item.title().unwrap_or("No Title 😢").to_string(),
             url: item.link().unwrap_or("No Link 😭").to_string(),
-            pub_date: parsed_date.into(),
+            author: item.author().map(str::to_string),
+            // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
+            pub_date: DateTime::parse_from_rfc2822(item.pub_date()?).ok()?.into(),
+            description: item.description().and_then(|desc| {
+                let html2text_config = html2text::config::plain()
+                    .no_link_wrapping()
+                    .link_footnotes(true);
+                Some(
+                    // Parse description as HTML and convert it into a multiline plain text
+                    html2text_config
+                        .string_from_read(desc.as_bytes(), usize::MAX)
+                        .unwrap_or(desc.to_string()),
+                )
+            }),
         })
     }
 }
