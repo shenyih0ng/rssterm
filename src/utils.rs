@@ -6,3 +6,9 @@ pub(crate) fn wrap_then_apply<T>(text: &String, width: usize, apply: fn(String) 
         .map(|cow| apply(cow.into_owned()))
         .collect()
 }
+
+#[macro_export]
+macro_rules! para_wrap {
+    () => {{ ::ratatui::widgets::Paragraph::default().wrap(Wrap { trim: true }) }};
+    ($text:expr) => {{ ::ratatui::widgets::Paragraph::new($text).wrap(Wrap { trim: true }) }};
+}

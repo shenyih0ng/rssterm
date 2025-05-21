@@ -1,6 +1,7 @@
 use std::{
     cmp::{max, min},
     error::Error,
+    iter::once,
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
@@ -10,14 +11,15 @@ use std::{
 use chrono::DateTime;
 use chrono_humanize::HumanTime;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use itertools::intersperse;
 use ratatui::{
     Frame, Terminal,
-    layout::{Alignment, Flex, Layout, Margin, Rect},
+    layout::{Flex, Layout, Margin, Rect},
     prelude::Backend,
     style::{Color, Stylize},
     text::Line,
     widgets::{
-        Block, BorderType, Borders, Clear, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
+        Block, BorderType, Clear, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Table, TableState, Widget, Wrap,
     },
 };
@@ -27,7 +29,7 @@ use rss::{Channel, Item};
 use tokio::{fs, task::JoinSet};
 use tokio_stream::StreamExt;
 
-use crate::{event::AppEvent, utils::wrap_then_apply};
+use crate::{event::AppEvent, para_wrap, utils::wrap_then_apply};
 
 #[derive(Default)]
 pub struct App {
@@ -102,7 +104,7 @@ impl App {
                 span!(" "),
                 span!(env!("CARGO_PKG_VERSION")).dark_gray(),
             ])
-            .alignment(Alignment::Left),
+            .left_aligned(),
             title_area,
         );
 
@@ -113,7 +115,7 @@ impl App {
                     .to_string(),
             )
             .dark_gray()
-            .alignment(Alignment::Right),
+            .right_aligned(),
             time_area,
         );
 
@@ -299,10 +301,7 @@ impl FeedWidget {
         frame.render_stateful_widget(scrollbar, sb_area, &mut self.sb_state);
 
         if self.expanded_idx.is_some() {
-            let popup_area = area.inner(Margin {
-                vertical: area.height / 16,
-                horizontal: area.width / 16,
-            });
+            let popup_area = area.inner(Margin::new(area.width / 16, area.height / 16));
             Clear.render(popup_area, frame.buffer_mut());
             feed_items[self.expanded_idx.unwrap()].render(frame, popup_area);
         }
@@ -319,12 +318,7 @@ impl FeedItem {
         let w_pub_date = wrap_then_apply(
             &HumanTime::from(self.pub_date).to_string(),
             col_areas[1].width as usize,
-            |line| {
-                line!(line)
-                    .light_blue()
-                    .italic()
-                    .alignment(Alignment::Right)
-            },
+            |line| line!(line).light_blue().italic().right_aligned(),
         );
 
         let row_height = max(content_lines.len(), w_pub_date.len()) as u16;
@@ -335,40 +329,65 @@ impl FeedItem {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let outer_block = Block::default()
-            .borders(Borders::ALL)
+        // The enclosing area that renders as an outline for the popup
+        let outline_block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Color::LightMagenta)
-            .padding(Padding {
-                left: 2,
-                right: 2,
-                top: 1,
-                bottom: 1,
-            });
+            .padding(Padding::symmetric(2, 1));
 
-        let content_area = outer_block.inner(area);
-        let content_layout: [Rect; 2] = vertical![==5%, *=0].areas(content_area);
+        let render_area = outline_block.inner(area);
+        // Dynamically wrap the title to calculate height required for full visibility
+        // `Paragraph::wrap` is not enough to guarantee visibility if the allocated
+        // area is smaller than the wrapped text. Therefore, we will need to dynamically
+        // set the height of the render area for the title
+        let title_lines = wrap_then_apply(&self.title, render_area.width as usize, |line| {
+            line!(line).white().bold()
+        });
+        let title_h = title_lines.len() as u16;
+        // Assume that the metadata (authors and pub_date) will only ever take up 2 lines
+        // This is not the best as there will be a breaking point where parts of metadata will be
+        // hidden if the width of the terminal is too small
+        let meta_h: u16 = 2;
 
-        let mut overview_lines = vec![
-            line!(self.title.clone()).white().bold(),
-            line!(self.pub_date.format("%H:%M:%S / %e-%b-%Y [%a]").to_string())
-                .light_blue()
-                .italic(),
-        ];
-        if let Some(author) = &self.author {
-            overview_lines
-                .push(line![span!("by ").dark_gray(), span!(author).light_green()].italic())
+        let [header_area, _, content_area, _]: [Rect; 4] =
+            // +1: padding between title and metadata
+            vertical![==(title_h + meta_h + 1), ==1, *=0, ==1].areas(render_area);
+
+        let [title_area, _, meta_area]: [Rect; 3] =
+            vertical![==title_h, ==1, ==meta_h].areas(header_area);
+
+        let [authors_area, pub_date_area]: [Rect; 2] = horizontal![==50%, ==50%]
+            .flex(Flex::SpaceBetween)
+            .areas(meta_area);
+
+        frame.render_widget(outline_block, area);
+        frame.render_widget(Paragraph::new(title_lines), title_area);
+
+        if !self.authors.is_empty() {
+            let authors_line = Line::from(
+                once(span!("by ").dark_gray())
+                    .chain(intersperse(
+                        self.authors
+                            .iter()
+                            .map(|author| span!(author).light_green().italic()),
+                        span!(", ").dark_gray(),
+                    ))
+                    .collect::<Vec<_>>(),
+            );
+            frame.render_widget(para_wrap!(authors_line), authors_area);
         }
-        let overview_content = Paragraph::new(overview_lines).wrap(Wrap { trim: true });
 
-        let desc_block = Block::default().padding(Padding::vertical(1));
-        let desc_content = Paragraph::new(self.description.clone().unwrap_or_default())
-            .wrap(Wrap { trim: true })
-            .block(desc_block);
+        let pub_date_para =
+            para_wrap!(self.pub_date.format("%H:%M:%S / %e-%b-%Y [%a]").to_string())
+                .light_blue()
+                .italic()
+                .right_aligned();
+        frame.render_widget(pub_date_para, pub_date_area);
 
-        frame.render_widget(outer_block, area);
-        frame.render_widget(overview_content, content_layout[0]);
-        frame.render_widget(desc_content, content_layout[1]);
+        frame.render_widget(
+            para_wrap!(self.description.clone().unwrap_or_default()),
+            content_area,
+        );
     }
 }
 
@@ -376,30 +395,47 @@ impl FeedItem {
 struct FeedItem {
     title: String,
     url: String,
-    author: Option<String>,
+    authors: Vec<String>,
     description: Option<String>,
     pub_date: DateTime<chrono::Local>,
 }
 
 impl FeedItem {
     fn from_rss_item(item: &Item) -> Option<Self> {
+        let html2text_config = html2text::config::plain()
+            .no_link_wrapping()
+            .link_footnotes(true);
+
+        let description = item.description().and_then(|desc| {
+            Some(
+                html2text_config
+                    .string_from_read(desc.as_bytes(), usize::MAX)
+                    .unwrap_or(desc.to_string()),
+            )
+        });
+
+        let mut authors = match item.dublin_core_ext {
+            Some(ref dcmi_ext) => dcmi_ext
+                .creators()
+                .iter()
+                .map(|creator| str::to_string(creator))
+                .collect(),
+            None => Vec::new(),
+        };
+        // Prioritise dublin core metadata over RSS metadata
+        // This is just a guess, but it seems like the dublin core metadata is more reliable and
+        // more widely used based on the feeds I am subscribed to
+        if authors.is_empty() {
+            item.author().map(|author| authors.push(author.to_string()));
+        }
+
         Some(Self {
             title: item.title().unwrap_or("No Title 😢").to_string(),
             url: item.link().unwrap_or("No Link 😭").to_string(),
-            author: item.author().map(str::to_string),
             // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
             pub_date: DateTime::parse_from_rfc2822(item.pub_date()?).ok()?.into(),
-            description: item.description().and_then(|desc| {
-                let html2text_config = html2text::config::plain()
-                    .no_link_wrapping()
-                    .link_footnotes(true);
-                Some(
-                    // Parse description as HTML and convert it into a multiline plain text
-                    html2text_config
-                        .string_from_read(desc.as_bytes(), usize::MAX)
-                        .unwrap_or(desc.to_string()),
-                )
-            }),
+            authors,
+            description,
         })
     }
 }
