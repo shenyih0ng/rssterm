@@ -14,8 +14,8 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use itertools::intersperse;
 use ratatui::{
     Frame, Terminal,
-    layout::{Flex, Layout, Margin, Rect},
-    prelude::Backend,
+    layout::{Flex, Layout, Margin, Rect, Size},
+    prelude::{Backend, StatefulWidget},
     style::{Color, Stylize},
     text::Line,
     widgets::{
@@ -28,8 +28,13 @@ use reqwest::Client;
 use rss::{Channel, Item};
 use tokio::{fs, task::JoinSet};
 use tokio_stream::StreamExt;
+use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
-use crate::{event::AppEvent, para_wrap, utils::wrap_then_apply};
+use crate::{
+    event::AppEvent,
+    para_wrap,
+    utils::{parse_html_or, wrap_then_apply},
+};
 
 #[derive(Default)]
 pub struct App {
@@ -77,6 +82,7 @@ impl App {
                     (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.handle_event(AppEvent::Scroll(-1)),
                     #[rustfmt::skip]
                     (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.handle_event(AppEvent::Scroll(1)),
+                    (_, KeyCode::Char('g')) => self.feed.handle_event(AppEvent::Scroll(isize::MIN)),
                     #[rustfmt::skip]
                     (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.handle_event(AppEvent::Scroll(isize::MAX)),
                     (_, KeyCode::Enter) => self.feed.handle_event(AppEvent::Open),
@@ -133,7 +139,8 @@ struct FeedWidget {
     tb_cum_row_heights: Vec<usize>,
     sb_state: ScrollbarState,
 
-    expanded_idx: Option<usize>,
+    exp_item_idx: Option<usize>,
+    exp_item_render_state: ScrollViewState,
 }
 
 #[derive(Default)]
@@ -153,7 +160,8 @@ impl Default for FeedWidget {
             tb_state: TableState::default(),
             tb_cum_row_heights: Vec::new(),
             sb_state: ScrollbarState::default(),
-            expanded_idx: None,
+            exp_item_idx: None,
+            exp_item_render_state: ScrollViewState::default(),
         }
     }
 }
@@ -191,25 +199,39 @@ impl FeedWidget {
     }
 
     fn handle_event(&mut self, event: AppEvent) {
+        let is_exp_item_active = self.exp_item_idx.is_some();
         match event {
-            AppEvent::Scroll(delta) => self.scroll(delta),
-            AppEvent::Expand => self.expanded_idx = self.tb_state.selected(),
-            AppEvent::Collapse => self.expanded_idx = None,
+            AppEvent::Scroll(delta) => {
+                if is_exp_item_active {
+                    self.scroll_exp_item(delta);
+                } else {
+                    self.scroll_feed(delta);
+                }
+            }
+            AppEvent::Expand => self.exp_item_idx = self.tb_state.selected(),
+            AppEvent::Collapse => {
+                self.exp_item_idx = None;
+                // Reset the scroll view state so that it does not persist between items
+                self.exp_item_render_state = ScrollViewState::default();
+            }
             AppEvent::Open => self.open_selected(),
         }
     }
 
-    fn scroll(&mut self, delta: isize) {
-        // If there is an expanded item, we don't want to scroll the table
-        if self.expanded_idx.is_some() {
-            return;
-        }
-
-        let abs_scroll_delta = delta.abs() as u16;
-        if delta < 0 {
-            self.tb_state.scroll_up_by(abs_scroll_delta);
+    fn scroll_feed(&mut self, delta: isize) {
+        if delta == isize::MAX || delta == isize::MIN {
+            if delta < 0 {
+                self.tb_state.select_first();
+            } else {
+                self.tb_state.select_last();
+            }
         } else {
-            self.tb_state.scroll_down_by(abs_scroll_delta);
+            let abs_scroll_delta = delta.abs() as u16;
+            if delta < 0 {
+                self.tb_state.scroll_up_by(abs_scroll_delta);
+            } else {
+                self.tb_state.scroll_down_by(abs_scroll_delta);
+            }
         }
         // NOTE: The range of selected_idx is [0, data.len() - 1]
         // This is likely to allow developers to catch overflow events to handle wrap arounds
@@ -226,6 +248,24 @@ impl FeedWidget {
                 .unwrap_or(&0)
                 * min(selected_item_idx, 1),
         );
+    }
+
+    fn scroll_exp_item(&mut self, delta: isize) {
+        if delta == isize::MAX || delta == isize::MIN {
+            if delta < 0 {
+                self.exp_item_render_state.scroll_to_top();
+            } else {
+                self.exp_item_render_state.scroll_to_bottom();
+            }
+        } else {
+            (0..delta.abs()).for_each(|_| {
+                if delta < 0 {
+                    self.exp_item_render_state.scroll_up();
+                } else {
+                    self.exp_item_render_state.scroll_down();
+                }
+            });
+        }
     }
 
     fn open_selected(&self) {
@@ -300,10 +340,14 @@ impl FeedWidget {
         frame.render_stateful_widget(table, tb_area, &mut self.tb_state);
         frame.render_stateful_widget(scrollbar, sb_area, &mut self.sb_state);
 
-        if self.expanded_idx.is_some() {
+        if self.exp_item_idx.is_some() {
             let popup_area = area.inner(Margin::new(area.width / 16, area.height / 16));
             Clear.render(popup_area, frame.buffer_mut());
-            feed_items[self.expanded_idx.unwrap()].render(frame, popup_area);
+            feed_items[self.exp_item_idx.unwrap()].render(
+                frame,
+                popup_area,
+                &mut self.exp_item_render_state,
+            );
         }
     }
 }
@@ -328,7 +372,7 @@ impl FeedItem {
         )
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, state: &mut ScrollViewState) {
         // The enclosing area that renders as an outline for the popup
         let outline_block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -384,10 +428,33 @@ impl FeedItem {
                 .right_aligned();
         frame.render_widget(pub_date_para, pub_date_area);
 
-        frame.render_widget(
-            para_wrap!(self.description.clone().unwrap_or_default()),
-            content_area,
-        );
+        let content = self
+            .content
+            .clone()
+            .unwrap_or_else(|| self.description.clone().unwrap_or_default());
+
+        let sv_total_width = content_area.width;
+        // -3: padding between the content and the scrollbar
+        let sv_content_width = content_area.width - 3;
+
+        let wrapped_content =
+            wrap_then_apply(&content, sv_content_width as usize, |line| line!(line));
+        let sv_total_height = wrapped_content.len() as u16;
+
+        let mut content_sv = ScrollView::new(Size {
+            width: sv_total_width,
+            height: sv_total_height,
+        })
+        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
+        // NOTE: This area is relative to the scrollview, not the frame
+        let sv_content_area = Rect {
+            width: sv_content_width,
+            height: sv_total_height,
+            ..Rect::ZERO
+        };
+
+        content_sv.render_widget(Paragraph::new(wrapped_content), sv_content_area);
+        content_sv.render(content_area, frame.buffer_mut(), state);
     }
 }
 
@@ -397,23 +464,12 @@ struct FeedItem {
     url: String,
     authors: Vec<String>,
     description: Option<String>,
+    content: Option<String>,
     pub_date: DateTime<chrono::Local>,
 }
 
 impl FeedItem {
     fn from_rss_item(item: &Item) -> Option<Self> {
-        let html2text_config = html2text::config::plain()
-            .no_link_wrapping()
-            .link_footnotes(true);
-
-        let description = item.description().and_then(|desc| {
-            Some(
-                html2text_config
-                    .string_from_read(desc.as_bytes(), usize::MAX)
-                    .unwrap_or(desc.to_string()),
-            )
-        });
-
         let mut authors = match item.dublin_core_ext {
             Some(ref dcmi_ext) => dcmi_ext
                 .creators()
@@ -429,6 +485,14 @@ impl FeedItem {
             item.author().map(|author| authors.push(author.to_string()));
         }
 
+        let description = item
+            .description()
+            .map(|desc| parse_html_or(desc, desc.to_string()));
+
+        let content = item
+            .content()
+            .map(|content| parse_html_or(content, content.to_string()));
+
         Some(Self {
             title: item.title().unwrap_or("No Title 😢").to_string(),
             url: item.link().unwrap_or("No Link 😭").to_string(),
@@ -436,6 +500,7 @@ impl FeedItem {
             pub_date: DateTime::parse_from_rfc2822(item.pub_date()?).ok()?.into(),
             authors,
             description,
+            content,
         })
     }
 }

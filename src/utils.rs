@@ -7,6 +7,14 @@ pub(crate) fn wrap_then_apply<T>(text: &String, width: usize, apply: fn(String) 
         .collect()
 }
 
+pub(crate) fn parse_html_or(html: &str, default: String) -> String {
+    html2text::config::plain()
+        .no_link_wrapping()
+        .link_footnotes(true)
+        .string_from_read(html.as_bytes(), usize::MAX)
+        .unwrap_or(default)
+}
+
 #[macro_export]
 macro_rules! para_wrap {
     () => {{ ::ratatui::widgets::Paragraph::default().wrap(Wrap { trim: true }) }};
