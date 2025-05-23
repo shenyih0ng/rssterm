@@ -4,12 +4,15 @@ pub(crate) enum AppEvent {
     // isize::MIN and isize::MAX respectively
     Scroll(isize),
 
-    // Bring up a different/expanded view of an item
+    // Enter a new view (e.g. a new screen or popup)
     Expand,
 
-    // Collapse the expanded view of an item
-    Collapse,
+    // Close a expanded/nested view (e.g. a popup or screen that is triggered by a parent widget)
+    Close,
 
-    // Open the item in the default application (e.g. browser)
+    // Open the item in the default (external) application (e.g. browser)
     Open,
+
+    // Exit the application - akin to a kill switch
+    Exit,
 }

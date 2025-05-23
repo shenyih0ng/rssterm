@@ -10,7 +10,7 @@ use std::{
 
 use chrono::DateTime;
 use chrono_humanize::HumanTime;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use itertools::intersperse;
 use ratatui::{
     Frame, Terminal,
@@ -26,7 +26,7 @@ use ratatui::{
 use ratatui_macros::{constraints, horizontal, line, row, span, vertical};
 use reqwest::Client;
 use rss::{Channel, Item};
-use tokio::{fs, task::JoinSet};
+use tokio::{fs, sync::mpsc::Receiver, sync::mpsc::Sender, task::JoinSet};
 use tokio_stream::StreamExt;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
@@ -36,12 +36,24 @@ use crate::{
     utils::{parse_html_or, wrap_then_apply},
 };
 
-#[derive(Default)]
 pub struct App {
     // app state
     should_quit: bool,
     // widgets
     feed: FeedWidget,
+
+    app_event_rx: Receiver<AppEvent>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::channel(1);
+        Self {
+            should_quit: false,
+            feed: FeedWidget::new(app_event_tx.clone()),
+            app_event_rx,
+        }
+    }
 }
 
 impl App {
@@ -59,42 +71,60 @@ impl App {
         );
 
         let mut tick_rate = tokio::time::interval(Duration::from_secs_f32(1.0 / fps));
-        let mut events = EventStream::new();
+        let mut term_events = EventStream::new();
 
         while !self.should_quit {
             tokio::select! {
                 _ = tick_rate.tick() => { terminal.draw(|frame| self.draw(frame))?; }
-                Some(Ok(event)) = events.next() => self.handle_event(&event),
+                Some(Ok(term_event)) = term_events.next() => self.handle_term_event(&term_event).await,
+                Some(AppEvent::Exit) = self.app_event_rx.recv() => {
+                    self.should_quit = true;
+                }
             }
         }
 
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(key) = event {
-            if key.kind == KeyEventKind::Press {
+    async fn handle_term_event(&mut self, event: &Event) {
+        let app_event = match event {
+            Event::Key(key) => self.parse_term_key_event(key),
+            _ => None,
+        };
+
+        if let Some(app_event) = app_event {
+            match app_event {
+                AppEvent::Exit => self.should_quit = true,
                 // Since there is only one active widget (`FeedWidget`), we can directly dispatch all
-                // non-quit events to it. When more widgets are added, we will need to identify which
+                // non-exit events to it. When more widgets are added, we will need to identify which
                 // widget is active and dispatch the event accordingly.
-                match (key.modifiers, key.code) {
-                    #[rustfmt::skip]
-                    (_, KeyCode::Up | KeyCode::Char('k')) => self.feed.handle_event(AppEvent::Scroll(-1)),
-                    #[rustfmt::skip]
-                    (_, KeyCode::Down | KeyCode::Char('j')) => self.feed.handle_event(AppEvent::Scroll(1)),
-                    (_, KeyCode::Char('g')) => self.feed.handle_event(AppEvent::Scroll(isize::MIN)),
-                    #[rustfmt::skip]
-                    (KeyModifiers::SHIFT, KeyCode::Char('G')) => self.feed.handle_event(AppEvent::Scroll(isize::MAX)),
-                    (_, KeyCode::Enter) => self.feed.handle_event(AppEvent::Open),
-                    (_, KeyCode::Char('o')) => self.feed.handle_event(AppEvent::Expand),
-                    (_, KeyCode::Char('q') | KeyCode::Esc) => {
-                        self.feed.handle_event(AppEvent::Collapse)
-                    }
-                    #[rustfmt::skip]
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => { self.should_quit = true;}
-                    _ => {}
+                _ => {
+                    self.feed.handle_event(app_event).await;
                 }
             }
+        }
+    }
+
+    // Map termainl (crossterm) key events to app events
+    // Can be thought of as the key binding handler
+    fn parse_term_key_event(&self, key_event: &KeyEvent) -> Option<AppEvent> {
+        // We are only interested in key press events
+        if key_event.kind != KeyEventKind::Press {
+            return None;
+        }
+        match (key_event.modifiers, key_event.code) {
+            (_, KeyCode::Up | KeyCode::Char('k')) => Some(AppEvent::Scroll(-1)),
+            (_, KeyCode::Down | KeyCode::Char('j')) => Some(AppEvent::Scroll(1)),
+            (_, KeyCode::Char('g')) => Some(AppEvent::Scroll(isize::MIN)),
+            (KeyModifiers::SHIFT, KeyCode::Char('G')) => Some(AppEvent::Scroll(isize::MAX)),
+
+            (_, KeyCode::Char('o')) => Some(AppEvent::Expand),
+            (_, KeyCode::Char('q') | KeyCode::Esc) => Some(AppEvent::Close),
+
+            (_, KeyCode::Enter) => Some(AppEvent::Open),
+
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(AppEvent::Exit),
+            _ => None,
         }
     }
 
@@ -131,6 +161,8 @@ impl App {
 
 #[derive(Clone)]
 struct FeedWidget {
+    app_event_tx: Sender<AppEvent>,
+
     data: Arc<RwLock<FeedWidgetData>>,
     http_client: Client,
 
@@ -148,13 +180,16 @@ struct FeedWidgetData {
     items: Vec<FeedItem>,
 }
 
-impl Default for FeedWidget {
-    fn default() -> Self {
+impl FeedWidget {
+    const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
+
+    fn new(app_event_tx: Sender<AppEvent>) -> Self {
         let http_client = Client::builder()
             .user_agent(Self::HTTP_USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
         Self {
+            app_event_tx,
             http_client,
             data: Arc::new(RwLock::new(FeedWidgetData::default())),
             tb_state: TableState::default(),
@@ -164,10 +199,6 @@ impl Default for FeedWidget {
             exp_item_render_state: ScrollViewState::default(),
         }
     }
-}
-
-impl FeedWidget {
-    const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
     fn run(&self, chan_urls: Vec<String>) {
         tokio::spawn(self.clone().fetch_feed(chan_urls));
@@ -198,7 +229,7 @@ impl FeedWidget {
         }
     }
 
-    fn handle_event(&mut self, event: AppEvent) {
+    async fn handle_event(&mut self, event: AppEvent) {
         let is_exp_item_active = self.exp_item_idx.is_some();
         match event {
             AppEvent::Scroll(delta) => {
@@ -209,12 +240,22 @@ impl FeedWidget {
                 }
             }
             AppEvent::Expand => self.exp_item_idx = self.tb_state.selected(),
-            AppEvent::Collapse => {
-                self.exp_item_idx = None;
-                // Reset the scroll view state so that it does not persist between items
-                self.exp_item_render_state = ScrollViewState::default();
+            AppEvent::Close => {
+                if self.exp_item_idx.is_some() {
+                    self.exp_item_idx = None;
+                    // Reset the scroll view state so that it does not persist between items
+                    self.exp_item_render_state = ScrollViewState::default();
+                } else {
+                    // If the feed widget does not have a nested view that can be closed,
+                    // we send a exit event upstream. We can do this because if a widget
+                    // receives an event, it is the only active/focused widget of the
+                    // entire application, as such the widget can safely determine whether
+                    // to exit the application
+                    self.app_event_tx.send(AppEvent::Exit).await.ok();
+                }
             }
             AppEvent::Open => self.open_selected(),
+            _ => (),
         }
     }
 
