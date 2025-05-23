@@ -1,6 +1,7 @@
 use std::{
     cmp::{max, min},
     error::Error,
+    hash::{DefaultHasher, Hash, Hasher},
     iter::once,
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -11,7 +12,7 @@ use std::{
 use chrono::DateTime;
 use chrono_humanize::HumanTime;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use itertools::intersperse;
+use itertools::{chain, intersperse};
 use ratatui::{
     Frame, Terminal,
     layout::{Flex, Layout, Margin, Rect, Size},
@@ -105,7 +106,7 @@ impl App {
         }
     }
 
-    // Map termainl (crossterm) key events to app events
+    // Map terminal (crossterm) key events to app events
     // Can be thought of as the key binding handler
     fn parse_term_key_event(&self, key_event: &KeyEvent) -> Option<AppEvent> {
         // We are only interested in key press events
@@ -171,7 +172,7 @@ struct FeedWidget {
     tb_cum_row_heights: Vec<usize>,
     sb_state: ScrollbarState,
 
-    exp_item_idx: Option<usize>,
+    exp_item_id: Option<u64>,
     exp_item_render_state: ScrollViewState,
 }
 
@@ -195,7 +196,7 @@ impl FeedWidget {
             tb_state: TableState::default(),
             tb_cum_row_heights: Vec::new(),
             sb_state: ScrollbarState::default(),
-            exp_item_idx: None,
+            exp_item_id: None,
             exp_item_render_state: ScrollViewState::default(),
         }
     }
@@ -230,7 +231,7 @@ impl FeedWidget {
     }
 
     async fn handle_event(&mut self, event: AppEvent) {
-        let is_exp_item_active = self.exp_item_idx.is_some();
+        let is_exp_item_active = self.exp_item_id.is_some();
         match event {
             AppEvent::Scroll(delta) => {
                 if is_exp_item_active {
@@ -239,10 +240,17 @@ impl FeedWidget {
                     self.scroll_feed(delta);
                 }
             }
-            AppEvent::Expand => self.exp_item_idx = self.tb_state.selected(),
+            AppEvent::Expand => {
+                let items = &self.data.read().unwrap().items;
+                if let Some(selected_item_idx) = self.tb_state.selected() {
+                    if let Some(feed_item) = items.get(selected_item_idx) {
+                        self.exp_item_id = Some(feed_item.id);
+                    }
+                }
+            }
             AppEvent::Close => {
-                if self.exp_item_idx.is_some() {
-                    self.exp_item_idx = None;
+                if self.exp_item_id.is_some() {
+                    self.exp_item_id = None;
                     // Reset the scroll view state so that it does not persist between items
                     self.exp_item_render_state = ScrollViewState::default();
                 } else {
@@ -310,17 +318,19 @@ impl FeedWidget {
     }
 
     fn open_selected(&self) {
-        let data = self.data.read().unwrap();
-        match self.tb_state.selected() {
-            Some(selected_item_idx) => {
-                if let Some(feed_item) = data.items.get(selected_item_idx) {
-                    open::that(feed_item.url.clone())
-                        .unwrap_or_else(|e| eprintln!("Failed to open URL: {}", e));
-                } else {
-                    eprintln!("No item selected");
-                }
-            }
-            None => eprintln!("No item selected"),
+        let items = &self.data.read().unwrap().items;
+
+        let open_result = self
+            .tb_state
+            .selected()
+            .and_then(|idx| items.get(idx))
+            .and_then(|item| item.url.as_ref())
+            .map(|url| open::that(url));
+
+        match open_result {
+            Some(Err(e)) => eprintln!("Failed to open URL: {}", e),
+            None => eprintln!("No item selected or no URL available"),
+            _ => {}
         }
     }
 
@@ -360,10 +370,15 @@ impl FeedWidget {
 
         self.sb_state = self.sb_state.content_length(tbl_total_content_height);
 
-        // If there are not currently selected item and there are items in the feed, select the first item
-        if self.tb_state.selected().is_none() && !feed_items.is_empty() {
-            self.tb_state.select(Some(0));
-        }
+        // Select the expanded item if available, otherwise select first item if none selected
+        let selected_item_index = self
+            .exp_item_id
+            .and_then(|item_id| feed_items.iter().position(|item| item.id == item_id))
+            .or_else(|| match self.tb_state.selected() {
+                None if !feed_items.is_empty() => Some(0),
+                current => current,
+            });
+        self.tb_state.select(selected_item_index);
 
         let table = Table::new(tb_rows, tb_col_layout)
             .highlight_symbol(Line::from(tb_highlight_symbol).magenta())
@@ -381,28 +396,43 @@ impl FeedWidget {
         frame.render_stateful_widget(table, tb_area, &mut self.tb_state);
         frame.render_stateful_widget(scrollbar, sb_area, &mut self.sb_state);
 
-        if self.exp_item_idx.is_some() {
-            let popup_area = area.inner(Margin::new(area.width / 16, area.height / 16));
-            Clear.render(popup_area, frame.buffer_mut());
-            feed_items[self.exp_item_idx.unwrap()].render(
-                frame,
-                popup_area,
-                &mut self.exp_item_render_state,
-            );
-        }
+        self.exp_item_id.map(
+            |item_id| match feed_items.iter().find(|item| item.id == item_id) {
+                Some(exp_item) => {
+                    let popup_area = area.inner(Margin::new(area.width / 16, area.height / 16));
+                    Clear.render(popup_area, frame.buffer_mut());
+                    exp_item.render(frame, popup_area, &mut self.exp_item_render_state);
+                }
+                None => (),
+            },
+        );
     }
 }
 
 impl FeedItem {
     fn draw_row(&self, col_areas: &[Rect; 2]) -> (Row<'_>, u16) {
-        let w_title = wrap_then_apply(&self.title, col_areas[0].width as usize, |line| {
-            line!(line).white().bold()
-        });
-        let content_lines = [w_title, vec![line!(self.url.clone()).dark_gray()]].concat();
+        let [label_width, pub_date_width] = col_areas.map(|area| area.width);
+
+        let w_title = {
+            let title_width = label_width as usize;
+            match &self.title {
+                Some(title_text) => wrap_then_apply(&title_text, title_width, |line_str| {
+                    line!(line_str).white().bold()
+                }),
+                None => wrap_then_apply(&"untitled".to_string(), title_width, |line_str| {
+                    line!(line_str).dark_gray().bold()
+                }),
+            }
+        };
+
+        let content_lines = match self.url {
+            Some(ref url) => chain(w_title, vec![line!(url.clone()).dark_gray()]).collect(),
+            None => w_title,
+        };
 
         let w_pub_date = wrap_then_apply(
             &HumanTime::from(self.pub_date).to_string(),
-            col_areas[1].width as usize,
+            pub_date_width as usize,
             |line| line!(line).light_blue().italic().right_aligned(),
         );
 
@@ -425,9 +455,13 @@ impl FeedItem {
         // `Paragraph::wrap` is not enough to guarantee visibility if the allocated
         // area is smaller than the wrapped text. Therefore, we will need to dynamically
         // set the height of the render area for the title
-        let title_lines = wrap_then_apply(&self.title, render_area.width as usize, |line| {
-            line!(line).white().bold()
-        });
+        let title_lines = match &self.title {
+            Some(title_text) => wrap_then_apply(title_text, render_area.width as usize, |line| {
+                line!(line).white().bold()
+            }),
+            None => vec![line!("untitled").dark_gray().bold()],
+        };
+
         let title_h = title_lines.len() as u16;
         // Assume that the metadata (authors and pub_date) will only ever take up 2 lines
         // This is not the best as there will be a breaking point where parts of metadata will be
@@ -501,8 +535,9 @@ impl FeedItem {
 
 #[derive(Clone, Default)]
 struct FeedItem {
-    title: String,
-    url: String,
+    id: u64,
+    title: Option<String>,
+    url: Option<String>,
     authors: Vec<String>,
     description: Option<String>,
     content: Option<String>,
@@ -534,9 +569,16 @@ impl FeedItem {
             .content()
             .map(|content| parse_html_or(content, content.to_string()));
 
+        // Generate a unique ID for the item
+        let mut hasher = DefaultHasher::default();
+        item.title.hash(&mut hasher);
+        item.description.hash(&mut hasher);
+        item.pub_date.hash(&mut hasher);
+
         Some(Self {
-            title: item.title().unwrap_or("No Title 😢").to_string(),
-            url: item.link().unwrap_or("No Link 😭").to_string(),
+            id: hasher.finish(),
+            title: item.title().map(str::to_string),
+            url: item.link().map(str::to_string),
             // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
             pub_date: DateTime::parse_from_rfc2822(item.pub_date()?).ok()?.into(),
             authors,
