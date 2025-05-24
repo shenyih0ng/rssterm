@@ -125,10 +125,10 @@ impl App {
             (_, KeyCode::Char('g')) => Some(AppEvent::Scroll(isize::MIN)),
             (KeyModifiers::SHIFT, KeyCode::Char('G')) => Some(AppEvent::Scroll(isize::MAX)),
 
-            (_, KeyCode::Char('o')) => Some(AppEvent::Expand),
-            (_, KeyCode::Char('q') | KeyCode::Esc) => Some(AppEvent::Close),
+            (_, KeyCode::Enter) => Some(AppEvent::Expand),
+            (_, KeyCode::Char('q')) => Some(AppEvent::Close),
 
-            (_, KeyCode::Enter) => Some(AppEvent::Open),
+            (_, KeyCode::Char('o')) => Some(AppEvent::Open),
 
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(AppEvent::Exit),
             _ => None,
