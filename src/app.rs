@@ -15,12 +15,12 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use itertools::{chain, intersperse};
 use ratatui::{
     Frame, Terminal,
-    layout::{Flex, Layout, Margin, Rect, Size},
+    layout::{Flex, Layout, Rect, Size},
     prelude::{Backend, StatefulWidget},
     style::{Color, Stylize},
     text::Line,
     widgets::{
-        Block, BorderType, Clear, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
+        Block, BorderType, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Table, TableState, Widget, Wrap,
     },
 };
@@ -347,6 +347,16 @@ impl FeedWidget {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
+        let feed_items = &self.data.read().unwrap().items;
+
+        if let Some(exp_feed_item) = self
+            .exp_item_id
+            .and_then(|id| feed_items.iter().find(|item| item.id == id))
+        {
+            exp_feed_item.render(frame, area, &mut self.exp_item_render_state);
+            return;
+        }
+
         let [tb_area, sb_area] = horizontal![*=1, ==2].areas(area);
 
         let tb_col_spacing = 2;
@@ -362,7 +372,6 @@ impl FeedWidget {
             ..tb_area
         });
 
-        let feed_items = self.data.read().unwrap().items.clone();
         self.tb_cum_row_heights.resize(feed_items.len(), 0);
 
         let mut tbl_total_content_height = 0;
@@ -371,9 +380,11 @@ impl FeedWidget {
             .enumerate()
             .map(|(idx, feed_item)| {
                 let (tb_row, tb_row_h) = feed_item.draw_row(&tb_col_areas);
+
                 let tb_row_btm_margin = (!(idx == feed_items.len().saturating_sub(1))) as u16;
                 let tb_row_total_h = tb_row_h + tb_row_btm_margin;
                 tbl_total_content_height += tb_row_total_h as usize;
+
                 // Each row has a dynamic height based on text wrapping therefore, cumulative row heights are updated every render cycle
                 self.tb_cum_row_heights[idx] = tbl_total_content_height;
                 tb_row.bottom_margin(tb_row_btm_margin)
@@ -407,17 +418,6 @@ impl FeedWidget {
 
         frame.render_stateful_widget(table, tb_area, &mut self.tb_state);
         frame.render_stateful_widget(scrollbar, sb_area, &mut self.sb_state);
-
-        self.exp_item_id.map(
-            |item_id| match feed_items.iter().find(|item| item.id == item_id) {
-                Some(exp_item) => {
-                    let popup_area = area.inner(Margin::new(area.width / 16, area.height / 16));
-                    Clear.render(popup_area, frame.buffer_mut());
-                    exp_item.render(frame, popup_area, &mut self.exp_item_render_state);
-                }
-                None => (),
-            },
-        );
     }
 }
 
@@ -438,7 +438,7 @@ impl FeedItem {
         };
 
         let content_lines = match self.url {
-            Some(ref url) => chain(w_title, vec![line!(url.clone()).dark_gray()]).collect(),
+            Some(ref url) => chain(w_title, vec![line!(url).dark_gray()]).collect(),
             None => w_title,
         };
 
@@ -517,15 +517,16 @@ impl FeedItem {
 
         let content = self
             .content
-            .clone()
-            .unwrap_or_else(|| self.description.clone().unwrap_or_default());
+            .as_deref()
+            .or(self.description.as_deref())
+            .unwrap_or("");
 
         let sv_total_width = content_area.width;
         // -3: padding between the content and the scrollbar
         let sv_content_width = content_area.width - 3;
 
         let wrapped_content =
-            wrap_then_apply(&content, sv_content_width as usize, |line| line!(line));
+            wrap_then_apply(content, sv_content_width as usize, |line| line!(line));
         let sv_total_height = wrapped_content.len() as u16;
 
         let mut content_sv = ScrollView::new(Size {
