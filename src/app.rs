@@ -1,8 +1,10 @@
 use std::{
+    borrow::Cow,
     cmp::{max, min},
     error::Error,
     hash::{DefaultHasher, Hash, Hasher},
     iter::once,
+    num::{NonZero, NonZeroU64},
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
@@ -21,7 +23,7 @@ use ratatui::{
     text::Line,
     widgets::{
         Block, BorderType, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Widget, Wrap,
+        ScrollbarOrientation, ScrollbarState, Table, TableState, Widget,
     },
 };
 use ratatui_macros::{constraints, horizontal, line, row, span, vertical};
@@ -184,8 +186,7 @@ struct FeedWidget {
     tb_cum_row_heights: Vec<usize>,
     sb_state: ScrollbarState,
 
-    exp_item_id: Option<u64>,
-    exp_item_render_state: ScrollViewState,
+    exp_item: ExpandedItemWidget,
 }
 
 #[derive(Default)]
@@ -208,8 +209,7 @@ impl FeedWidget {
             tb_state: TableState::default(),
             tb_cum_row_heights: Vec::new(),
             sb_state: ScrollbarState::default(),
-            exp_item_id: None,
-            exp_item_render_state: ScrollViewState::default(),
+            exp_item: ExpandedItemWidget::default(),
         }
     }
 
@@ -243,7 +243,7 @@ impl FeedWidget {
     }
 
     async fn handle_event(&mut self, event: AppEvent) {
-        let is_exp_item_active = self.exp_item_id.is_some();
+        let is_exp_item_active = self.exp_item.id.is_some();
         match event {
             AppEvent::Scroll(delta) => {
                 if is_exp_item_active {
@@ -256,15 +256,13 @@ impl FeedWidget {
                 let items = &self.data.read().unwrap().items;
                 if let Some(selected_item_idx) = self.tb_state.selected() {
                     if let Some(feed_item) = items.get(selected_item_idx) {
-                        self.exp_item_id = Some(feed_item.id);
+                        self.exp_item.id = Some(feed_item.id);
                     }
                 }
             }
             AppEvent::Close => {
-                if self.exp_item_id.is_some() {
-                    self.exp_item_id = None;
-                    // Reset the scroll view state so that it does not persist between items
-                    self.exp_item_render_state = ScrollViewState::default();
+                if self.exp_item.id.is_some() {
+                    self.exp_item = ExpandedItemWidget::default();
                 } else {
                     // If the feed widget does not have a nested view that can be closed,
                     // we send a exit event upstream. We can do this because if a widget
@@ -314,16 +312,16 @@ impl FeedWidget {
     fn scroll_exp_item(&mut self, delta: isize) {
         if delta == isize::MAX || delta == isize::MIN {
             if delta < 0 {
-                self.exp_item_render_state.scroll_to_top();
+                self.exp_item.render_state.scroll_to_top();
             } else {
-                self.exp_item_render_state.scroll_to_bottom();
+                self.exp_item.render_state.scroll_to_bottom();
             }
         } else {
             (0..delta.abs()).for_each(|_| {
                 if delta < 0 {
-                    self.exp_item_render_state.scroll_up();
+                    self.exp_item.render_state.scroll_up();
                 } else {
-                    self.exp_item_render_state.scroll_down();
+                    self.exp_item.render_state.scroll_down();
                 }
             });
         }
@@ -350,11 +348,11 @@ impl FeedWidget {
         let feed_items = &self.data.read().unwrap().items;
 
         if let Some(exp_feed_item) = self
-            .exp_item_id
+            .exp_item
+            .id
             .and_then(|id| feed_items.iter().find(|item| item.id == id))
         {
-            exp_feed_item.render(frame, area, &mut self.exp_item_render_state);
-            return;
+            return self.exp_item.render(frame, area, exp_feed_item);
         }
 
         let [tb_area, sb_area] = horizontal![*=1, ==2].areas(area);
@@ -395,7 +393,8 @@ impl FeedWidget {
 
         // Select the expanded item if available, otherwise select first item if none selected
         let selected_item_index = self
-            .exp_item_id
+            .exp_item
+            .id
             .and_then(|item_id| feed_items.iter().position(|item| item.id == item_id))
             .or_else(|| match self.tb_state.selected() {
                 None if !feed_items.is_empty() => Some(0),
@@ -454,9 +453,19 @@ impl FeedItem {
             row_height,
         )
     }
+}
 
-    fn render(&self, frame: &mut Frame, area: Rect, state: &mut ScrollViewState) {
-        // The enclosing area that renders as an outline for the popup
+#[derive(Clone, Default)]
+struct ExpandedItemWidget {
+    id: Option<NonZeroU64>,
+    last_content_render_width: Option<u16>,
+    cached_item_render_content: Option<Vec<Line<'static>>>,
+
+    render_state: ScrollViewState,
+}
+
+impl ExpandedItemWidget {
+    fn render(&mut self, frame: &mut Frame, area: Rect, feed_item: &FeedItem) {
         let outline_block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Color::LightMagenta)
@@ -467,7 +476,7 @@ impl FeedItem {
         // `Paragraph::wrap` is not enough to guarantee visibility if the allocated
         // area is smaller than the wrapped text. Therefore, we will need to dynamically
         // set the height of the render area for the title
-        let title_lines = match &self.title {
+        let title_lines = match &feed_item.title {
             Some(title_text) => wrap_then_apply(title_text, render_area.width as usize, |line| {
                 line!(line).white().bold()
             }),
@@ -494,39 +503,41 @@ impl FeedItem {
         frame.render_widget(outline_block, area);
         frame.render_widget(Paragraph::new(title_lines), title_area);
 
-        if !self.authors.is_empty() {
-            let authors_line = Line::from(
-                once(span!("by ").dark_gray())
-                    .chain(intersperse(
-                        self.authors
-                            .iter()
-                            .map(|author| span!(author).light_green().italic()),
-                        span!(", ").dark_gray(),
-                    ))
-                    .collect::<Vec<_>>(),
+        if !feed_item.authors.is_empty() {
+            frame.render_widget(
+                para_wrap!(Line::from(
+                    once(span!("by ").dark_gray())
+                        .chain(intersperse(
+                            feed_item
+                                .authors
+                                .iter()
+                                .map(|author| span!(author).light_green().italic()),
+                            span!(", ").dark_gray(),
+                        ))
+                        .collect::<Vec<_>>(),
+                )),
+                authors_area,
             );
-            frame.render_widget(para_wrap!(authors_line), authors_area);
         }
 
-        let pub_date_para =
-            para_wrap!(self.pub_date.format("%H:%M:%S / %e-%b-%Y [%a]").to_string())
-                .light_blue()
-                .italic()
-                .right_aligned();
-        frame.render_widget(pub_date_para, pub_date_area);
+        frame.render_widget(
+            para_wrap!(
+                feed_item
+                    .pub_date
+                    .format("%H:%M:%S / %e-%b-%Y [%a]")
+                    .to_string()
+            )
+            .light_blue()
+            .italic()
+            .right_aligned(),
+            pub_date_area,
+        );
 
         let sv_total_width = content_area.width;
         // -3: padding between the content and the scrollbar
         let sv_content_width = content_area.width - 3;
 
-        let wrapped_content = wrap_then_apply_vec(
-            self.content
-                .as_deref()
-                .or(self.description.as_deref())
-                .unwrap_or(&[]),
-            sv_content_width as usize,
-            |line| line!(line),
-        );
+        let wrapped_content = self.get_or_update_content(feed_item, sv_content_width);
 
         let sv_total_height = wrapped_content.len() as u16;
         // NOTE: This area is relative to the scrollview, not the frame
@@ -542,14 +553,46 @@ impl FeedItem {
         })
         .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
 
-        content_sv.render_widget(Paragraph::new(wrapped_content), sv_content_area);
-        content_sv.render(content_area, frame.buffer_mut(), state);
+        content_sv.render_widget(
+            Paragraph::new(wrapped_content.into_owned()),
+            sv_content_area,
+        );
+        content_sv.render(content_area, frame.buffer_mut(), &mut self.render_state);
+    }
+
+    fn get_or_update_content(
+        &mut self,
+        feed_item: &FeedItem,
+        sv_content_width: u16,
+    ) -> Cow<[Line<'static>]> {
+        let render_width_changed = self.last_content_render_width != Some(sv_content_width);
+        let item_id_changed = self.id != Some(feed_item.id);
+
+        if !render_width_changed && !item_id_changed && self.cached_item_render_content.is_some() {
+            return Cow::Borrowed(self.cached_item_render_content.as_ref().unwrap());
+        }
+
+        let new_wrapped_content = wrap_then_apply_vec(
+            feed_item
+                .content
+                .as_deref()
+                .or(feed_item.description.as_deref())
+                .unwrap_or(&[]),
+            sv_content_width as usize,
+            |line| line!(line),
+        );
+
+        self.id = Some(feed_item.id);
+        self.last_content_render_width = Some(sv_content_width);
+        self.cached_item_render_content = Some(new_wrapped_content);
+
+        Cow::Borrowed(self.cached_item_render_content.as_ref().unwrap())
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct FeedItem {
-    id: u64,
+    id: NonZeroU64,
     title: Option<String>,
     url: Option<String>,
     authors: Vec<String>,
@@ -590,7 +633,7 @@ impl FeedItem {
         item.pub_date.hash(&mut hasher);
 
         Some(Self {
-            id: hasher.finish(),
+            id: NonZero::new(hasher.finish()).unwrap(),
             title: item.title().map(str::to_string),
             url: item.link().map(str::to_string),
             // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date

@@ -30,6 +30,6 @@ pub(crate) fn parse_html(html: &str) -> Result<Vec<String>, html2text::Error> {
 
 #[macro_export]
 macro_rules! para_wrap {
-    () => {{ ::ratatui::widgets::Paragraph::default().wrap(Wrap { trim: true }) }};
-    ($text:expr) => {{ ::ratatui::widgets::Paragraph::new($text).wrap(Wrap { trim: true }) }};
+    () => {{ ::ratatui::widgets::Paragraph::default().wrap(::ratatui::widgets::Wrap { trim: true }) }};
+    ($text:expr) => {{ ::ratatui::widgets::Paragraph::new($text).wrap(::ratatui::widgets::Wrap { trim: true }) }};
 }
