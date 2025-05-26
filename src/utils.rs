@@ -3,16 +3,29 @@ use textwrap::{Options, wrap};
 pub(crate) fn wrap_then_apply<T>(text: &str, width: usize, apply: fn(String) -> T) -> Vec<T> {
     wrap(text, Options::new(width).break_words(true))
         .into_iter()
-        .map(|cow| apply(cow.into_owned()))
+        .map(|line_str| apply(line_str.to_string()))
         .collect()
 }
 
-pub(crate) fn parse_html_or(html: &str, default: String) -> String {
+pub(crate) fn wrap_then_apply_vec<T>(
+    lines: &[String],
+    width: usize,
+    apply: fn(String) -> T,
+) -> Vec<T> {
+    lines
+        .iter()
+        .flat_map(|line| wrap_then_apply(line, width, apply))
+        .collect()
+}
+
+pub(crate) fn parse_html(html: &str) -> Result<Vec<String>, html2text::Error> {
     html2text::config::plain()
         .no_link_wrapping()
         .link_footnotes(true)
+        // `html2text` does provide a `lines_from_read` method, however there isn't
+        // a good way to convert lines to to `Vec<String>` directly.
         .string_from_read(html.as_bytes(), usize::MAX)
-        .unwrap_or(default)
+        .map(|text| text.lines().map(str::to_owned).collect())
 }
 
 #[macro_export]

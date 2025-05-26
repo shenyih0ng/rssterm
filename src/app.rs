@@ -34,7 +34,7 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use crate::{
     event::AppEvent,
     para_wrap,
-    utils::{parse_html_or, wrap_then_apply},
+    utils::{parse_html, wrap_then_apply, wrap_then_apply_vec},
 };
 
 use crate::debug::FpsWidget;
@@ -130,7 +130,7 @@ impl App {
 
             (_, KeyCode::Char('o')) => Some(AppEvent::Open),
 
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(AppEvent::Exit),
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some(AppEvent::Exit),
             _ => None,
         }
     }
@@ -515,31 +515,32 @@ impl FeedItem {
                 .right_aligned();
         frame.render_widget(pub_date_para, pub_date_area);
 
-        let content = self
-            .content
-            .as_deref()
-            .or(self.description.as_deref())
-            .unwrap_or("");
-
         let sv_total_width = content_area.width;
         // -3: padding between the content and the scrollbar
         let sv_content_width = content_area.width - 3;
 
-        let wrapped_content =
-            wrap_then_apply(content, sv_content_width as usize, |line| line!(line));
-        let sv_total_height = wrapped_content.len() as u16;
+        let wrapped_content = wrap_then_apply_vec(
+            self.content
+                .as_deref()
+                .or(self.description.as_deref())
+                .unwrap_or(&[]),
+            sv_content_width as usize,
+            |line| line!(line),
+        );
 
-        let mut content_sv = ScrollView::new(Size {
-            width: sv_total_width,
-            height: sv_total_height,
-        })
-        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
+        let sv_total_height = wrapped_content.len() as u16;
         // NOTE: This area is relative to the scrollview, not the frame
         let sv_content_area = Rect {
             width: sv_content_width,
             height: sv_total_height,
             ..Rect::ZERO
         };
+
+        let mut content_sv = ScrollView::new(Size {
+            width: sv_total_width,
+            height: sv_total_height,
+        })
+        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
 
         content_sv.render_widget(Paragraph::new(wrapped_content), sv_content_area);
         content_sv.render(content_area, frame.buffer_mut(), state);
@@ -552,8 +553,8 @@ struct FeedItem {
     title: Option<String>,
     url: Option<String>,
     authors: Vec<String>,
-    description: Option<String>,
-    content: Option<String>,
+    description: Option<Vec<String>>,
+    content: Option<Vec<String>>,
     pub_date: DateTime<chrono::Local>,
 }
 
@@ -576,11 +577,11 @@ impl FeedItem {
 
         let description = item
             .description()
-            .map(|desc| parse_html_or(desc, desc.to_string()));
+            .map(|desc| parse_html(desc).unwrap_or(vec![desc.to_owned()]));
 
         let content = item
             .content()
-            .map(|content| parse_html_or(content, content.to_string()));
+            .map(|content| parse_html(content).unwrap_or(vec![content.to_owned()]));
 
         // Generate a unique ID for the item
         let mut hasher = DefaultHasher::default();
