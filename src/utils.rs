@@ -22,8 +22,8 @@ pub(crate) fn parse_html(html: &str) -> Result<Vec<String>, html2text::Error> {
     html2text::config::plain()
         .no_link_wrapping()
         .link_footnotes(true)
-        // `html2text` does provide a `lines_from_read` method, however there isn't
-        // a good way to convert lines to to `Vec<String>` directly.
+        // `html2text` does provide a `lines_from_read` method, however there isn't a good way to convert
+        // lines to to `Vec<String>` directly.
         .string_from_read(html.as_bytes(), usize::MAX)
         .map(|text| text.lines().map(str::to_owned).collect())
 }

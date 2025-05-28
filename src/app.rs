@@ -112,10 +112,8 @@ impl App {
         }
     }
 
-    // Map terminal (crossterm) key events to app events
-    // Can be thought of as the key binding handler
+    // Map terminal (crossterm) key events to app event - can be thought of as the key binding handler
     fn parse_term_key_event(&self, key_event: &KeyEvent) -> Option<AppEvent> {
-        // We are only interested in key press events
         if key_event.kind != KeyEventKind::Press {
             return None;
         }
@@ -180,8 +178,7 @@ struct FeedWidget {
     http_client: Client,
 
     tb_state: TableState,
-    // Cumulative rendered height of each row in the table
-    tb_cum_row_heights: Vec<usize>,
+    tb_cum_row_heights: Vec<usize>, // Cumulative rendered height of each row in the table
     sb_state: ScrollbarState,
 
     exp_item: ExpandedItemWidget,
@@ -262,11 +259,10 @@ impl FeedWidget {
                 if self.exp_item.id.is_some() {
                     self.exp_item = ExpandedItemWidget::default();
                 } else {
-                    // If the feed widget does not have a nested view that can be closed,
-                    // we send a exit event upstream. We can do this because if a widget
-                    // receives an event, it is the only active/focused widget of the
-                    // entire application, as such the widget can safely determine whether
-                    // to exit the application
+                    // If the feed widget does not have a nested view that can be closed, we send a exit
+                    // event upstream. We can do this because if a widget receives an event, it is the
+                    // only active/focused widget of the entire app, as such the widget can safely
+                    // determine whether to exit the app
                     self.app_event_tx.send(AppEvent::Exit).await.ok();
                 }
             }
@@ -355,7 +351,8 @@ impl FeedWidget {
                 let tb_row_total_h = tb_row_h + tb_row_btm_margin;
                 tbl_total_content_height += tb_row_total_h as usize;
 
-                // Each row has a dynamic height based on text wrapping therefore, cumulative row heights are updated every render cycle
+                // Each row has a dynamic height determined by text wrapping. Therefore, cumulative row
+                // heights are updated every render cycle
                 self.tb_cum_row_heights[idx] = tbl_total_content_height;
                 tb_row.bottom_margin(tb_row_btm_margin)
             })
@@ -430,10 +427,9 @@ impl FeedItem {
 #[derive(Clone, Default)]
 struct ExpandedItemWidget {
     id: Option<NonZeroU64>,
-    curr_content_render_width: Option<u16>,
     cached_render_content: Option<Vec<Line<'static>>>,
 
-    // Used to determine the maximum scrollable height for content
+    curr_content_render_width: Option<u16>,
     curr_content_render_height: Option<u16>,
 
     scroll_offset: usize,
@@ -470,10 +466,9 @@ impl ExpandedItemWidget {
             .padding(Padding::symmetric(2, 1));
 
         let render_area = outline_block.inner(area);
-        // Dynamically wrap the title to calculate height required for full visibility
-        // `Paragraph::wrap` is not enough to guarantee visibility if the allocated
-        // area is smaller than the wrapped text. Therefore, we will need to dynamically
-        // set the height of the render area for the title
+        // Dynamically wrap the title to calculate height required for full visibility.
+        // `Paragraph::wrap` is not enough to guarantee visibility if the allocated area is smaller than
+        // the wrapped text. Therefore, we will need to dynamically set the height of the render area for the title
         let title_lines = match &feed_item.title {
             Some(title_text) => wrap_then_apply(title_text, render_area.width as usize, |line| {
                 line!(line).white().bold()
@@ -482,9 +477,8 @@ impl ExpandedItemWidget {
         };
 
         let title_h = title_lines.len() as u16;
-        // Assume that the metadata (authors and pub_date) will only ever take up 2 lines
-        // This is not the best as there will be a breaking point where parts of metadata will be
-        // hidden if the width of the terminal is too small
+        // Assume that metadata will only ever take up 2 lines. This is not ideal as there will be a
+        // breaking point where parts of metadata will be hidden if the width of the terminal is too small
         let meta_h: u16 = 2;
 
         let [header_area, _, content_area, _]: [Rect; 4] =
@@ -610,9 +604,9 @@ impl FeedItem {
                 .collect(),
             None => Vec::new(),
         };
-        // Prioritise dublin core metadata over RSS metadata
-        // This is just a guess, but it seems like the dublin core metadata is more reliable and
-        // more widely used based on the feeds I am subscribed to
+        // Prioritise dublin core metadata (dcmi) over RSS metadata
+        // This is just a guess, but it seems like the dcmi is more reliable and more widely used based
+        // on the feeds I am subscribed to
         if authors.is_empty() {
             item.author().map(|author| authors.push(author.to_string()));
         }
@@ -635,7 +629,6 @@ impl FeedItem {
             id: NonZero::new(hasher.finish()).unwrap(),
             title: item.title().map(str::to_string),
             url: item.link().map(str::to_string),
-            // https://docs.rs/rss/2.0.12/rss/struct.Item.html#structfield.pub_date
             pub_date: DateTime::parse_from_rfc2822(item.pub_date()?).ok()?.into(),
             authors,
             description,

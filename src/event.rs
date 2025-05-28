@@ -1,7 +1,7 @@
 pub(crate) enum AppEvent {
     // Scroll event with a delta where positive is down and negative is up
-    // This can be used for Go-To-Bottom and Go-To-Top events where the delta is
-    // isize::MIN and isize::MAX respectively
+    // This can be used for Go-To-Bottom and Go-To-Top events where the delta is isize::MIN and
+    // isize::MAX respectively
     Scroll(isize),
 
     // Enter a new view (e.g. a new screen or popup)
