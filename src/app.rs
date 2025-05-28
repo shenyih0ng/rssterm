@@ -3,7 +3,6 @@ use std::{
     cmp::{max, min},
     error::Error,
     hash::{DefaultHasher, Hash, Hasher},
-    iter::once,
     num::{NonZero, NonZeroU64},
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -14,11 +13,11 @@ use std::{
 use chrono::DateTime;
 use chrono_humanize::HumanTime;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use itertools::{chain, intersperse};
+use itertools::chain;
 use ratatui::{
     Frame, Terminal,
-    layout::{Flex, Layout, Rect, Size},
-    prelude::{Backend, StatefulWidget},
+    layout::{Flex, Layout, Rect},
+    prelude::Backend,
     style::{Color, Stylize},
     text::Line,
     widgets::{
@@ -31,7 +30,6 @@ use reqwest::Client;
 use rss::{Channel, Item};
 use tokio::{fs, sync::mpsc::Receiver, sync::mpsc::Sender, task::JoinSet};
 use tokio_stream::StreamExt;
-use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use crate::{
     event::AppEvent,
@@ -247,7 +245,7 @@ impl FeedWidget {
         match event {
             AppEvent::Scroll(delta) => {
                 if is_exp_item_active {
-                    self.scroll_exp_item(delta);
+                    self.exp_item.scroll(delta);
                 } else {
                     self.scroll_feed(delta);
                 }
@@ -278,19 +276,11 @@ impl FeedWidget {
     }
 
     fn scroll_feed(&mut self, delta: isize) {
-        if delta == isize::MAX || delta == isize::MIN {
-            if delta < 0 {
-                self.tb_state.select_first();
-            } else {
-                self.tb_state.select_last();
-            }
-        } else {
-            let abs_scroll_delta = delta.abs() as u16;
-            if delta < 0 {
-                self.tb_state.scroll_up_by(abs_scroll_delta);
-            } else {
-                self.tb_state.scroll_down_by(abs_scroll_delta);
-            }
+        match delta {
+            isize::MIN => self.tb_state.select_first(),
+            isize::MAX => self.tb_state.select_last(),
+            delta if delta < 0 => self.tb_state.scroll_up_by((-delta) as u16),
+            delta => self.tb_state.scroll_down_by(delta as u16),
         }
         // NOTE: The range of selected_idx is [0, data.len() - 1]
         // This is likely to allow developers to catch overflow events to handle wrap arounds
@@ -307,24 +297,6 @@ impl FeedWidget {
                 .unwrap_or(&0)
                 * min(selected_item_idx, 1),
         );
-    }
-
-    fn scroll_exp_item(&mut self, delta: isize) {
-        if delta == isize::MAX || delta == isize::MIN {
-            if delta < 0 {
-                self.exp_item.render_state.scroll_to_top();
-            } else {
-                self.exp_item.render_state.scroll_to_bottom();
-            }
-        } else {
-            (0..delta.abs()).for_each(|_| {
-                if delta < 0 {
-                    self.exp_item.render_state.scroll_up();
-                } else {
-                    self.exp_item.render_state.scroll_down();
-                }
-            });
-        }
     }
 
     fn open_selected(&self) {
@@ -458,13 +430,39 @@ impl FeedItem {
 #[derive(Clone, Default)]
 struct ExpandedItemWidget {
     id: Option<NonZeroU64>,
-    last_content_render_width: Option<u16>,
-    cached_item_render_content: Option<Vec<Line<'static>>>,
+    curr_content_render_width: Option<u16>,
+    cached_render_content: Option<Vec<Line<'static>>>,
 
-    render_state: ScrollViewState,
+    // Used to determine the maximum scrollable height for content
+    curr_content_render_height: Option<u16>,
+
+    scroll_offset: usize,
+    sb_state: ScrollbarState,
 }
 
 impl ExpandedItemWidget {
+    fn get_max_scroll_offset(&self) -> usize {
+        self.cached_render_content
+            .as_ref()
+            .map_or(0, |content| content.len())
+            .saturating_sub(self.curr_content_render_height.unwrap_or(0) as usize)
+    }
+
+    fn scroll(&mut self, delta: isize) {
+        match delta {
+            isize::MIN => self.scroll_offset = 0,
+            isize::MAX => self.scroll_offset = self.get_max_scroll_offset(),
+            delta if delta < 0 => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(delta.unsigned_abs())
+            }
+            delta => {
+                self.scroll_offset =
+                    (self.scroll_offset + delta as usize).min(self.get_max_scroll_offset());
+            }
+        }
+        self.sb_state = self.sb_state.position(self.scroll_offset);
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, feed_item: &FeedItem) {
         let outline_block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -504,20 +502,14 @@ impl ExpandedItemWidget {
         frame.render_widget(Paragraph::new(title_lines), title_area);
 
         if !feed_item.authors.is_empty() {
-            frame.render_widget(
-                para_wrap!(Line::from(
-                    once(span!("by ").dark_gray())
-                        .chain(intersperse(
-                            feed_item
-                                .authors
-                                .iter()
-                                .map(|author| span!(author).light_green().italic()),
-                            span!(", ").dark_gray(),
-                        ))
-                        .collect::<Vec<_>>(),
-                )),
-                authors_area,
-            );
+            let mut author_spans = vec![span!("by ").dark_gray()];
+            for (idx, author) in feed_item.authors.iter().enumerate() {
+                if idx > 0 {
+                    author_spans.push(span!(", ").dark_gray());
+                }
+                author_spans.push(span!(author).light_green().italic());
+            }
+            frame.render_widget(para_wrap!(Line::from(author_spans)), authors_area);
         }
 
         frame.render_widget(
@@ -533,60 +525,67 @@ impl ExpandedItemWidget {
             pub_date_area,
         );
 
-        let sv_total_width = content_area.width;
-        // -3: padding between the content and the scrollbar
-        let sv_content_width = content_area.width - 3;
+        let [text_area, sb_area] = horizontal![*=1, ==2].areas(content_area);
 
-        let wrapped_content = self.get_or_update_content(feed_item, sv_content_width);
+        let content = self.sync_content_and_viewport(feed_item, text_area);
+        let content_height = content.len();
 
-        let sv_total_height = wrapped_content.len() as u16;
-        // NOTE: This area is relative to the scrollview, not the frame
-        let sv_content_area = Rect {
-            width: sv_content_width,
-            height: sv_total_height,
-            ..Rect::ZERO
-        };
+        let visible_content = content
+            .into_owned()
+            .into_iter()
+            .skip(self.scroll_offset)
+            .take(text_area.height as usize)
+            .collect::<Vec<_>>();
 
-        let mut content_sv = ScrollView::new(Size {
-            width: sv_total_width,
-            height: sv_total_height,
-        })
-        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
+        frame.render_widget(Paragraph::new(visible_content), text_area);
 
-        content_sv.render_widget(
-            Paragraph::new(wrapped_content.into_owned()),
-            sv_content_area,
-        );
-        content_sv.render(content_area, frame.buffer_mut(), &mut self.render_state);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(Color::DarkGray);
+
+        let scrollable_height = content_height.saturating_sub(text_area.height as usize);
+        self.sb_state = self.sb_state.content_length(scrollable_height);
+
+        frame.render_stateful_widget(scrollbar, sb_area, &mut self.sb_state);
     }
 
-    fn get_or_update_content(
+    fn sync_content_and_viewport(
         &mut self,
         feed_item: &FeedItem,
-        sv_content_width: u16,
+        render_area: Rect,
     ) -> Cow<[Line<'static>]> {
-        let render_width_changed = self.last_content_render_width != Some(sv_content_width);
+        let render_width_changed = match self.curr_content_render_width {
+            Some(curr_render_width) => curr_render_width != render_area.width,
+            None => true,
+        };
         let item_id_changed = self.id != Some(feed_item.id);
 
-        if !render_width_changed && !item_id_changed && self.cached_item_render_content.is_some() {
-            return Cow::Borrowed(self.cached_item_render_content.as_ref().unwrap());
+        if render_width_changed || item_id_changed {
+            let new_wrapped_content = wrap_then_apply_vec(
+                feed_item
+                    .content
+                    .as_deref()
+                    .or(feed_item.description.as_deref())
+                    .unwrap_or(&[]),
+                render_area.width as usize,
+                |line| line!(line),
+            );
+            self.cached_render_content = Some(new_wrapped_content);
         }
 
-        let new_wrapped_content = wrap_then_apply_vec(
-            feed_item
-                .content
-                .as_deref()
-                .or(feed_item.description.as_deref())
-                .unwrap_or(&[]),
-            sv_content_width as usize,
-            |line| line!(line),
-        );
-
         self.id = Some(feed_item.id);
-        self.last_content_render_width = Some(sv_content_width);
-        self.cached_item_render_content = Some(new_wrapped_content);
+        self.curr_content_render_height = Some(render_area.height);
+        self.curr_content_render_width = Some(render_area.width);
 
-        Cow::Borrowed(self.cached_item_render_content.as_ref().unwrap())
+        // Ensure that the scroll offset is within the bounds of the content
+        self.scroll_offset = self.scroll_offset.min(self.get_max_scroll_offset());
+        self.sb_state = self.sb_state.position(self.scroll_offset);
+
+        Cow::Borrowed(self.cached_render_content.as_ref().unwrap())
     }
 }
 
