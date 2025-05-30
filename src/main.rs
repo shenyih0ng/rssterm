@@ -15,6 +15,7 @@ use std::{f32, io};
 mod app;
 mod debug;
 mod event;
+mod stream;
 mod utils;
 
 use crate::app::App;

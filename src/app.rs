@@ -12,7 +12,7 @@ use std::{
 
 use chrono::DateTime;
 use chrono_humanize::HumanTime;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use itertools::chain;
 use ratatui::{
     Frame, Terminal,
@@ -34,6 +34,7 @@ use tokio_stream::StreamExt;
 use crate::{
     event::AppEvent,
     para_wrap,
+    stream::RateLimitedEventStream,
     utils::{parse_html, wrap_then_apply, wrap_then_apply_vec},
 };
 
@@ -82,13 +83,23 @@ impl App {
         );
 
         let mut tick_rate = tokio::time::interval(tick_rate);
-        let mut term_events = EventStream::new();
+
+        /*
+         Currently, only scroll events (up/down/mouse scroll) are rate-limited to 15ms
+         The logic for determining whether an event should be rate-limited is in the `RateLimitedEventStream`
+
+         The chosen delay ensures that scroll events are still buttery-smooth at a FPS of 1s/15ms = 66.67 FPS,
+         while also preventing scroll event flooding when the user scrolls too fast (especially those with
+         a mx master mouse wheel that scrolls blazingly fast - myself included).
+        */
+        let mut term_events = RateLimitedEventStream::new(Duration::from_millis(15));
 
         while !self.should_quit {
             tokio::select! {
-                _ = tick_rate.tick() => { terminal.draw(|frame| self.draw(frame))?; }
+                biased;
                 Some(Ok(term_event)) = term_events.next() => self.handle_term_event(&term_event).await,
-                Some(AppEvent::Exit) = self.app_event_rx.recv() => self.should_quit = true
+                Some(AppEvent::Exit) = self.app_event_rx.recv() => self.should_quit = true,
+                _ = tick_rate.tick() => { terminal.draw(|frame| self.draw(frame))?; }
             }
         }
 
@@ -113,7 +124,7 @@ impl App {
     }
 
     // Map terminal (crossterm) key events to app event - can be thought of as the key binding handler
-    fn parse_term_key_event(&self, key_event: &KeyEvent) -> Option<AppEvent> {
+    fn parse_term_key_event(&mut self, key_event: &KeyEvent) -> Option<AppEvent> {
         if key_event.kind != KeyEventKind::Press {
             return None;
         }
@@ -285,7 +296,7 @@ impl FeedWidget {
             .tb_state
             .selected()
             .unwrap_or(0)
-            .clamp(0, self.tb_cum_row_heights.len() - 1);
+            .clamp(0, self.tb_cum_row_heights.len().saturating_sub(1));
         // If the first item is selected, there should be no scrollbar movement (i.e. position 0)
         self.sb_state = self.sb_state.position(
             self.tb_cum_row_heights
