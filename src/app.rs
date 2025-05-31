@@ -27,7 +27,6 @@ use ratatui::{
 };
 use ratatui_macros::{constraints, horizontal, line, row, span, vertical};
 use reqwest::Client;
-use rss::{Channel, Item};
 use tokio::{fs, sync::mpsc::Receiver, sync::mpsc::Sender, task::JoinSet};
 use tokio_stream::StreamExt;
 
@@ -35,7 +34,7 @@ use crate::{
     event::AppEvent,
     para_wrap,
     stream::RateLimitedEventStream,
-    utils::{parse_html, wrap_then_apply, wrap_then_apply_vec},
+    utils::{try_parse_html, wrap_then_apply, wrap_then_apply_vec},
 };
 
 use crate::debug::FpsWidget;
@@ -200,6 +199,11 @@ struct FeedWidgetData {
     items: Vec<FeedItem>,
 }
 
+enum Feed {
+    Atom(atom_syndication::Feed),
+    Rss(rss::Channel),
+}
+
 impl FeedWidget {
     const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
@@ -224,22 +228,40 @@ impl FeedWidget {
     }
 
     async fn fetch_feed(self, chan_urls: Vec<String>) {
-        let mut query_set: JoinSet<Result<Channel, Box<dyn Error + Send + Sync>>> = JoinSet::new();
+        let mut query_set: JoinSet<Result<Feed, Box<dyn Error + Send + Sync>>> = JoinSet::new();
 
         for chan_url in chan_urls {
             let local_http_client = self.http_client.clone();
             query_set.spawn(async move {
                 let http_resp = local_http_client.get(chan_url).send().await?;
-                return Ok(Channel::read_from(&(http_resp.bytes().await?)[..])?);
+                let http_resp_bytes = &http_resp.bytes().await?[..];
+                match rss::Channel::read_from(http_resp_bytes) {
+                    Ok(rss_feed) => Ok(Feed::Rss(rss_feed)),
+                    Err(_) => match atom_syndication::Feed::read_from(http_resp_bytes) {
+                        Ok(atom_feed) => Ok(Feed::Atom(atom_feed)),
+                        Err(_) => Err(Box::from("Failed to parse feed")),
+                    },
+                }
             });
         }
 
         while let Some(result) = query_set.join_next().await {
             match result {
-                Ok(Ok(rss_chan)) => {
+                Ok(Ok(parsed_feed)) => {
+                    let new_items: Vec<_> = match parsed_feed {
+                        Feed::Atom(atom_feed) => atom_feed
+                            .entries()
+                            .iter()
+                            .filter_map(FeedItem::from_atom_entry)
+                            .collect(),
+                        Feed::Rss(rss_feed) => rss_feed
+                            .items()
+                            .iter()
+                            .filter_map(FeedItem::from_rss_item)
+                            .collect(),
+                    };
                     let mut data = self.data.write().unwrap();
-                    data.items
-                        .extend(rss_chan.items().iter().filter_map(FeedItem::from_rss_item));
+                    data.items.extend(new_items);
                     data.items.sort_by(|a, b| b.pub_date.cmp(&a.pub_date));
                 }
                 Ok(Err(e)) => eprintln!("Feed fetch error: {}", e),
@@ -606,7 +628,36 @@ struct FeedItem {
 }
 
 impl FeedItem {
-    fn from_rss_item(item: &Item) -> Option<Self> {
+    fn from_atom_entry(entry: &atom_syndication::Entry) -> Option<Self> {
+        let url = entry
+            .links
+            .iter()
+            .find(|link| link.rel == "alternate")
+            .or_else(|| entry.links.first())
+            .map(|link| link.href.to_owned());
+
+        let mut hasher = DefaultHasher::default();
+        (&entry.id, &entry.title.value, &entry.updated).hash(&mut hasher);
+
+        Some(Self {
+            id: NonZero::new(hasher.finish()).unwrap(),
+            title: Some(entry.title.value.to_owned()),
+            authors: entry
+                .authors
+                .iter()
+                .map(|author| author.name.to_owned())
+                .collect(),
+            description: entry.summary().map(|desc| try_parse_html(&desc.value)),
+            content: entry
+                .content()
+                .and_then(|c| c.value())
+                .map(|c_str| try_parse_html(c_str)),
+            url,
+            pub_date: entry.updated.into(),
+        })
+    }
+
+    fn from_rss_item(item: &rss::Item) -> Option<Self> {
         let mut authors = match item.dublin_core_ext {
             Some(ref dcmi_ext) => dcmi_ext
                 .creators()
@@ -622,28 +673,17 @@ impl FeedItem {
             item.author().map(|author| authors.push(author.to_string()));
         }
 
-        let description = item
-            .description()
-            .map(|desc| parse_html(desc).unwrap_or(vec![desc.to_owned()]));
-
-        let content = item
-            .content()
-            .map(|content| parse_html(content).unwrap_or(vec![content.to_owned()]));
-
-        // Generate a unique ID for the item
         let mut hasher = DefaultHasher::default();
-        item.title.hash(&mut hasher);
-        item.description.hash(&mut hasher);
-        item.pub_date.hash(&mut hasher);
+        (&item.title, &item.description, &item.pub_date).hash(&mut hasher);
 
         Some(Self {
             id: NonZero::new(hasher.finish()).unwrap(),
             title: item.title().map(str::to_string),
             url: item.link().map(str::to_string),
             pub_date: DateTime::parse_from_rfc2822(item.pub_date()?).ok()?.into(),
+            description: item.description().map(try_parse_html),
+            content: item.content().map(try_parse_html),
             authors,
-            description,
-            content,
         })
     }
 }

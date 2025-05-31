@@ -18,7 +18,7 @@ pub(crate) fn wrap_then_apply_vec<T>(
         .collect()
 }
 
-pub(crate) fn parse_html(html: &str) -> Result<Vec<String>, html2text::Error> {
+pub(crate) fn try_parse_html(html: &str) -> Vec<String> {
     html2text::config::plain()
         .no_link_wrapping()
         .link_footnotes(true)
@@ -26,6 +26,7 @@ pub(crate) fn parse_html(html: &str) -> Result<Vec<String>, html2text::Error> {
         // lines to to `Vec<String>` directly.
         .string_from_read(html.as_bytes(), usize::MAX)
         .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or(vec![html.to_owned()])
 }
 
 #[macro_export]
