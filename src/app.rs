@@ -359,17 +359,19 @@ impl FeedWidget {
         let [tb_area, sb_area] = horizontal![*=1, ==2].areas(area);
 
         let tb_col_spacing = 2;
-        let tb_highlight_symbol = ">> ";
-        // Dynamically calculate the rendered width of each table column, required for text wrapping
         let tb_col_layout = constraints![*=0, ==20%];
-        let tb_hl_symbol_len = tb_highlight_symbol.len() as u16;
-        let tb_col_areas: [Rect; 2] = Layout::horizontal(tb_col_layout).areas(Rect {
-            x: tb_area.x + tb_hl_symbol_len,
-            width: tb_area
-                .width
-                .saturating_sub(tb_hl_symbol_len + tb_col_spacing),
-            ..tb_area
-        });
+
+        let tb_hl_symbol = ">> ";
+        let tb_hl_symbol_len = tb_hl_symbol.len() as u16;
+
+        // Dynamically calculate the rendered width of each table column, required for text wrapping
+        let tb_col_areas: [Rect; 2] = Layout::horizontal(tb_col_layout)
+            .spacing(tb_col_spacing)
+            .areas(Rect {
+                x: tb_area.x + tb_hl_symbol_len,
+                width: tb_area.width.saturating_sub(tb_hl_symbol_len),
+                ..tb_area
+            });
 
         self.tb_cum_row_heights.resize(feed_items.len(), 0);
 
@@ -405,7 +407,7 @@ impl FeedWidget {
         self.tb_state.select(selected_item_index);
 
         let table = Table::new(tb_rows, tb_col_layout)
-            .highlight_symbol(Line::from(tb_highlight_symbol).magenta())
+            .highlight_symbol(Line::from(tb_hl_symbol).magenta())
             .highlight_spacing(HighlightSpacing::Always)
             .column_spacing(tb_col_spacing);
 
