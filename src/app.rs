@@ -144,8 +144,10 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let [header_area, main_area, fps_area] = vertical![==2, *=1, ==(self.fps.is_some() as u16)]
-            .areas(frame.area().inner(Margin::new(1, 1)));
+        let fps_widget_h = if self.fps.is_some() { 1 } else { 0 };
+        let [header_area, main_area, _, footer_area, _, fps_area] =
+            vertical![==2, *=1, ==1, ==1, ==fps_widget_h, ==fps_widget_h]
+                .areas(frame.area().inner(Margin::new(1, 1)));
 
         let [title_area, time_area] = horizontal![==30, ==30]
             .flex(Flex::SpaceBetween)
@@ -169,6 +171,28 @@ impl App {
         );
 
         self.feed.render(frame, main_area);
+
+        let help_key_desc = [
+            ("j/k/↑/↓", "scroll"),
+            ("g/G", "top/btm"),
+            ("Enter", "expand"),
+            ("o", "open"),
+            ("q", "close"),
+            ("Ctrl+D", "exit"),
+        ];
+
+        let mut help_spans = vec![];
+        for (i, (key, desc)) in help_key_desc.iter().enumerate() {
+            if i > 0 {
+                help_spans.push(span!(" | "));
+            }
+            help_spans.extend(vec![span!(key).bold(), span!(" {}", desc)]);
+        }
+        frame.render_widget(
+            // Custom fixed colour to ensure readability (against dark themed terminals)
+            Line::from(help_spans).fg(Color::Rgb(100, 116, 139)),
+            footer_area,
+        );
 
         if let Some(fps_widget) = &mut self.fps {
             fps_widget.render(fps_area, frame.buffer_mut());
@@ -278,8 +302,8 @@ impl FeedWidget {
             }
             AppEvent::Expand => {
                 let items = &self.data.read().unwrap().items;
-                if let Some(selected_item_idx) = self.tb_state.selected() {
-                    if let Some(feed_item) = items.get(selected_item_idx) {
+                if let Some(selected_item_i) = self.tb_state.selected() {
+                    if let Some(feed_item) = items.get(selected_item_i) {
                         self.exp_item.id = Some(feed_item.id);
                     }
                 }
@@ -307,10 +331,10 @@ impl FeedWidget {
             delta if delta < 0 => self.tb_state.scroll_up_by((-delta) as u16),
             delta => self.tb_state.scroll_down_by(delta as u16),
         }
-        // NOTE: The range of selected_idx is [0, data.len() - 1]
+        // NOTE: The range of selected_i is [0, data.len() - 1]
         // This is likely to allow developers to catch overflow events to handle wrap arounds
         // Currently, we are not allowing wrap arounds, hence we are clamping the value
-        let selected_item_idx = self
+        let selected_item_i = self
             .tb_state
             .selected()
             .unwrap_or(0)
@@ -318,9 +342,9 @@ impl FeedWidget {
         // If the first item is selected, there should be no scrollbar movement (i.e. position 0)
         self.sb_state = self.sb_state.position(
             self.tb_cum_row_heights
-                .get(selected_item_idx.saturating_sub(1))
+                .get(selected_item_i.saturating_sub(1))
                 .unwrap_or(&0)
-                * min(selected_item_idx, 1),
+                * min(selected_item_i, 1),
         );
     }
 
@@ -330,7 +354,7 @@ impl FeedWidget {
         let open_result = self
             .tb_state
             .selected()
-            .and_then(|idx| items.get(idx))
+            .and_then(|i| items.get(i))
             .and_then(|item| item.url.as_ref())
             .map(|url| open::that(url));
 
@@ -375,16 +399,16 @@ impl FeedWidget {
         let tb_rows: Vec<Row> = feed_items
             .iter()
             .enumerate()
-            .map(|(idx, feed_item)| {
+            .map(|(i, feed_item)| {
                 let (tb_row, tb_row_h) = feed_item.draw_row(&tb_col_areas);
 
-                let tb_row_btm_margin = (!(idx == feed_items.len().saturating_sub(1))) as u16;
+                let tb_row_btm_margin = (!(i == feed_items.len().saturating_sub(1))) as u16;
                 let tb_row_total_h = tb_row_h + tb_row_btm_margin;
                 tbl_total_content_height += tb_row_total_h as usize;
 
                 // Each row has a dynamic height determined by text wrapping. Therefore, cumulative row
                 // heights are updated every render cycle
-                self.tb_cum_row_heights[idx] = tbl_total_content_height;
+                self.tb_cum_row_heights[i] = tbl_total_content_height;
                 tb_row.bottom_margin(tb_row_btm_margin)
             })
             .collect();
@@ -535,8 +559,8 @@ impl ExpandedItemWidget {
 
         if !feed_item.authors.is_empty() {
             let mut author_spans = vec![span!("by ").dim()];
-            for (idx, author) in feed_item.authors.iter().enumerate() {
-                if idx > 0 {
+            for (i, author) in feed_item.authors.iter().enumerate() {
+                if i > 0 {
                     author_spans.push(span!(", ").dim());
                 }
                 author_spans.push(span!(author).light_green().italic());
