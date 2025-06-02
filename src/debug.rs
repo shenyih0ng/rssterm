@@ -42,7 +42,7 @@ impl Widget for &mut FpsWidget {
         }
 
         if let Some(curr_fps) = self.curr_fps {
-            let mut fps_text = vec![span!(format!("{:.2} fps", curr_fps)).yellow()];
+            let mut fps_text = vec![span!("{:.2} fps", curr_fps).green()];
 
             if let Some(prev_fps) = self.prev_fps {
                 let p_delta = if prev_fps == 0.0 {

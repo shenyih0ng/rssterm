@@ -1,20 +1,11 @@
 use textwrap::{Options, wrap};
 
+pub const LONG_TIMESTAMP_FMT: &str = "%H:%M:%S / %-e-%b-%Y [%a]";
+
 pub(crate) fn wrap_then_apply<T>(text: &str, width: usize, apply: fn(String) -> T) -> Vec<T> {
     wrap(text, Options::new(width).break_words(true))
         .into_iter()
         .map(|line_str| apply(line_str.to_string()))
-        .collect()
-}
-
-pub(crate) fn wrap_then_apply_vec<T>(
-    lines: &[String],
-    width: usize,
-    apply: fn(String) -> T,
-) -> Vec<T> {
-    lines
-        .iter()
-        .flat_map(|line| wrap_then_apply(line, width, apply))
         .collect()
 }
 

@@ -16,16 +16,16 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use itertools::chain;
 use ratatui::{
     Frame, Terminal,
-    layout::{Flex, Layout, Rect},
+    layout::{Flex, Layout, Margin, Rect},
     prelude::Backend,
     style::{Color, Stylize},
-    text::Line,
+    text::{Line, Text},
     widgets::{
-        Block, BorderType, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Widget,
+        Block, BorderType, HighlightSpacing, Padding, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Table, TableState, Widget,
     },
 };
-use ratatui_macros::{constraints, horizontal, line, row, span, vertical};
+use ratatui_macros::{constraints, horizontal, line, row, span, text, vertical};
 use reqwest::Client;
 use tokio::{fs, sync::mpsc::Receiver, sync::mpsc::Sender, task::JoinSet};
 use tokio_stream::StreamExt;
@@ -34,7 +34,7 @@ use crate::{
     event::AppEvent,
     para_wrap,
     stream::RateLimitedEventStream,
-    utils::{try_parse_html, wrap_then_apply, wrap_then_apply_vec},
+    utils::{LONG_TIMESTAMP_FMT, try_parse_html, wrap_then_apply},
 };
 
 use crate::debug::FpsWidget;
@@ -144,31 +144,27 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let [header_area, main_area, fps_area] =
-            vertical![==2, *=1, ==(self.fps.is_some() as u16)].areas(frame.area());
+        let [header_area, main_area, fps_area] = vertical![==2, *=1, ==(self.fps.is_some() as u16)]
+            .areas(frame.area().inner(Margin::new(1, 1)));
 
         let [title_area, time_area] = horizontal![==30, ==30]
             .flex(Flex::SpaceBetween)
             .areas(header_area);
 
         frame.render_widget(
-            Paragraph::new(line![
+            line![
                 span!(env!("CARGO_PKG_NAME")).magenta().bold(),
                 span!(" "),
-                span!(env!("CARGO_PKG_VERSION")).dark_gray(),
-            ])
+                span!("v{}", env!("CARGO_PKG_VERSION")).blue(),
+            ]
             .left_aligned(),
             title_area,
         );
 
         frame.render_widget(
-            Paragraph::new(
-                chrono::Local::now()
-                    .format("%H:%M:%S / %e-%b-%Y [%a]")
-                    .to_string(),
-            )
-            .dark_gray()
-            .right_aligned(),
+            line!(chrono::Local::now().format(LONG_TIMESTAMP_FMT).to_string())
+                .cyan()
+                .right_aligned(),
             time_area,
         );
 
@@ -407,7 +403,7 @@ impl FeedWidget {
         self.tb_state.select(selected_item_index);
 
         let table = Table::new(tb_rows, tb_col_layout)
-            .highlight_symbol(Line::from(tb_hl_symbol).magenta())
+            .highlight_symbol(span!(tb_hl_symbol).magenta())
             .highlight_spacing(HighlightSpacing::Always)
             .column_spacing(tb_col_spacing);
 
@@ -431,24 +427,24 @@ impl FeedItem {
         let w_title = {
             let title_width = label_width as usize;
             match &self.title {
-                Some(title_text) => wrap_then_apply(&title_text, title_width, |line_str| {
-                    line!(line_str).white().bold()
-                }),
-                None => wrap_then_apply(&"untitled".to_string(), title_width, |line_str| {
-                    line!(line_str).dark_gray().bold()
+                Some(title_text) => {
+                    wrap_then_apply(&title_text, title_width, |l| line!(l).white().bold())
+                }
+                None => wrap_then_apply(&"untitled".to_string(), title_width, |l| {
+                    line!(l).dim().bold()
                 }),
             }
         };
 
         let content_lines = match self.url {
-            Some(ref url) => chain(w_title, vec![line!(url).dark_gray()]).collect(),
+            Some(ref url) => chain(w_title, vec![line!(url).dim()]).collect(),
             None => w_title,
         };
 
         let w_pub_date = wrap_then_apply(
             &HumanTime::from(self.pub_date).to_string(),
             pub_date_width as usize,
-            |line| line!(line).light_blue().italic().right_aligned(),
+            |l| line!(l).yellow().italic().right_aligned(),
         );
 
         let row_height = max(content_lines.len(), w_pub_date.len()) as u16;
@@ -497,7 +493,7 @@ impl ExpandedItemWidget {
     fn render(&mut self, frame: &mut Frame, area: Rect, feed_item: &FeedItem) {
         let outline_block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(Color::LightMagenta)
+            .border_style(Color::DarkGray)
             .padding(Padding::symmetric(2, 1));
 
         let render_area = outline_block.inner(area);
@@ -505,10 +501,10 @@ impl ExpandedItemWidget {
         // `Paragraph::wrap` is not enough to guarantee visibility if the allocated area is smaller than
         // the wrapped text. Therefore, we will need to dynamically set the height of the render area for the title
         let title_lines = match &feed_item.title {
-            Some(title_text) => wrap_then_apply(title_text, render_area.width as usize, |line| {
-                line!(line).white().bold()
+            Some(title_text) => wrap_then_apply(title_text, render_area.width as usize, |l| {
+                line!(l).white().bold()
             }),
-            None => vec![line!("untitled").dark_gray().bold()],
+            None => vec![line!("untitled").dim().bold()],
         };
 
         let title_h = title_lines.len() as u16;
@@ -523,36 +519,33 @@ impl ExpandedItemWidget {
         let [title_area, _, meta_area]: [Rect; 3] =
             vertical![==title_h, ==1, ==meta_h].areas(header_area);
 
-        let [authors_area, pub_date_area]: [Rect; 2] = horizontal![==50%, ==50%]
+        let [left_meta_area, right_meta_area]: [Rect; 2] = horizontal![==50%, ==50%]
             .flex(Flex::SpaceBetween)
             .areas(meta_area);
 
         frame.render_widget(outline_block, area);
-        frame.render_widget(Paragraph::new(title_lines), title_area);
+        frame.render_widget(Text::from(title_lines), title_area);
+
+        let pub_date_label = para_wrap!(text![
+            line!(HumanTime::from(feed_item.pub_date).to_string())
+                .yellow()
+                .italic(),
+            line!(feed_item.pub_date.format(LONG_TIMESTAMP_FMT).to_string()).dim()
+        ]);
 
         if !feed_item.authors.is_empty() {
-            let mut author_spans = vec![span!("by ").dark_gray()];
+            let mut author_spans = vec![span!("by ").dim()];
             for (idx, author) in feed_item.authors.iter().enumerate() {
                 if idx > 0 {
-                    author_spans.push(span!(", ").dark_gray());
+                    author_spans.push(span!(", ").dim());
                 }
                 author_spans.push(span!(author).light_green().italic());
             }
-            frame.render_widget(para_wrap!(Line::from(author_spans)), authors_area);
+            frame.render_widget(para_wrap!(text!(author_spans)), left_meta_area);
+            frame.render_widget(pub_date_label.right_aligned(), right_meta_area);
+        } else {
+            frame.render_widget(pub_date_label.left_aligned(), left_meta_area);
         }
-
-        frame.render_widget(
-            para_wrap!(
-                feed_item
-                    .pub_date
-                    .format("%H:%M:%S / %e-%b-%Y [%a]")
-                    .to_string()
-            )
-            .light_blue()
-            .italic()
-            .right_aligned(),
-            pub_date_area,
-        );
 
         let [text_area, sb_area] = horizontal![*=1, ==2].areas(content_area);
 
@@ -566,7 +559,7 @@ impl ExpandedItemWidget {
             .take(text_area.height as usize)
             .collect::<Vec<_>>();
 
-        frame.render_widget(Paragraph::new(visible_content), text_area);
+        frame.render_widget(Text::from(visible_content), text_area);
 
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
@@ -594,16 +587,22 @@ impl ExpandedItemWidget {
         let item_id_changed = self.id != Some(feed_item.id);
 
         if render_width_changed || item_id_changed {
-            let new_wrapped_content = wrap_then_apply_vec(
-                feed_item
-                    .content
-                    .as_deref()
-                    .or(feed_item.description.as_deref())
-                    .unwrap_or(&[]),
-                render_area.width as usize,
-                |line| line!(line),
-            );
-            self.cached_render_content = Some(new_wrapped_content);
+            let content_to_render = feed_item
+                .content
+                .as_deref()
+                .or(feed_item.description.as_deref());
+
+            self.cached_render_content = content_to_render.map(|content| {
+                content
+                    .iter()
+                    .flat_map(|l| {
+                        wrap_then_apply(l, render_area.width as usize, |l| {
+                            // Custom warm white color for better readability
+                            line!(l).fg(Color::Rgb(232, 233, 240))
+                        })
+                    })
+                    .collect()
+            });
         }
 
         self.id = Some(feed_item.id);
