@@ -66,7 +66,7 @@ impl App {
     pub async fn run<B: Backend>(
         mut self,
         terminal: &mut Terminal<B>,
-        config_file: PathBuf,
+        feeds_file: PathBuf,
         tick_rate: Duration,
         show_fps: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -75,7 +75,7 @@ impl App {
         }
 
         self.feed.run(
-            fs::read_to_string(config_file)
+            fs::read_to_string(feeds_file)
                 .await
                 .map(|s| s.trim().lines().map(str::to_owned).collect())
                 .unwrap_or(Vec::new()),

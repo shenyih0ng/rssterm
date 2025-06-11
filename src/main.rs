@@ -1,14 +1,14 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ratatui::Terminal;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::CrosstermBackend;
-use std::env::VarError;
+use std::env::home_dir;
 use std::error::Error;
 use std::panic::{set_hook, take_hook};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use std::{f32, io};
 
@@ -20,10 +20,19 @@ mod utils;
 
 use crate::app::App;
 
+fn default_feeds_file() -> PathBuf {
+    home_dir()
+        .map(|home_dir| home_dir.join(".config/rssterm/feeds.txt"))
+        // Fallback to relative path if HOME is not set
+        .unwrap_or_else(|| PathBuf::from("feeds.txt"))
+}
+
 #[derive(Parser)]
 #[command(version)]
 #[command(about = "i read rss feeds on the terminal btw")]
 struct Cli {
+    #[arg(long = "feeds", env = "RSSTERM_FEEDS", default_value = default_feeds_file().into_os_string())]
+    feeds_file: PathBuf,
     #[arg(
         long,
         default_value_t = 60.0,
@@ -32,21 +41,23 @@ struct Cli {
     fps: f32,
     #[arg(long, default_value_t = false)]
     show_fps: bool,
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-// TODO: Let user specify the config file path via CLI argument
-fn get_config_file() -> Result<PathBuf, VarError> {
-    let config_file = if let Ok(env_file_path) = std::env::var("RSSTERM_CONFIG") {
-        PathBuf::from(env_file_path)
-    } else {
-        std::env::var("HOME").map(|home_dir| Path::new(&home_dir).join(".rssterm.config"))?
-    };
-    Ok(config_file)
+#[derive(Subcommand)]
+enum Commands {
+    Feeds,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
+
+    if matches!(args.command, Some(Commands::Feeds)) {
+        println!("{}", args.feeds_file.display());
+        return Ok(());
+    }
 
     let tick_rate = if args.fps == 0.0 {
         Duration::from_secs_f32(f32::EPSILON)
@@ -71,7 +82,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }));
 
     App::default()
-        .run(&mut terminal, get_config_file()?, tick_rate, args.show_fps)
+        .run(&mut terminal, args.feeds_file, tick_rate, args.show_fps)
         .await?;
 
     term_restore()?;
