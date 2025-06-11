@@ -20,3 +20,4 @@ itertools = "0.14.0"
 clap = { version = "4.5.38", features = ["derive", "env", "string"] }
 atom_syndication = "0.12.7"
 directories = "6.0.0"
+throbber-widgets-tui = "0.8.0"

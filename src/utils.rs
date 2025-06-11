@@ -1,4 +1,8 @@
+use std::time::{Duration, Instant};
+
+use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use textwrap::{Options, wrap};
+use throbber_widgets_tui::{Throbber as TuiThrobber, ThrobberState as TuiThrobberState};
 
 pub const LONG_TIMESTAMP_FMT: &str = "%H:%M:%S / %-e-%b-%Y [%a]";
 
@@ -24,4 +28,29 @@ pub(crate) fn try_parse_html(html: &str) -> Vec<String> {
 macro_rules! para_wrap {
     () => {{ ::ratatui::widgets::Paragraph::default().wrap(::ratatui::widgets::Wrap { trim: true }) }};
     ($text:expr) => {{ ::ratatui::widgets::Paragraph::new($text).wrap(::ratatui::widgets::Wrap { trim: true }) }};
+}
+
+pub(crate) struct Throbber {
+    interval: Duration,
+
+    _inner: TuiThrobberState,
+    _last_instant: Instant,
+}
+
+impl Throbber {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            _inner: TuiThrobberState::default(),
+            _last_instant: Instant::now(),
+        }
+    }
+
+    pub fn render(&mut self, tui_throbber: TuiThrobber, area: Rect, buf: &mut Buffer) {
+        if self._last_instant.elapsed() >= self.interval {
+            self._inner.calc_next();
+            self._last_instant = Instant::now();
+        }
+        tui_throbber.render(area, buf, &mut self._inner);
+    }
 }

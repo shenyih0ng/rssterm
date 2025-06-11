@@ -5,7 +5,10 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     num::{NonZero, NonZeroU64},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
     vec,
 };
@@ -27,14 +30,18 @@ use ratatui::{
 };
 use ratatui_macros::{constraints, horizontal, line, row, span, text, vertical};
 use reqwest::Client;
-use tokio::{fs, sync::mpsc::Receiver, sync::mpsc::Sender, task::JoinSet};
+use tokio::{
+    fs,
+    sync::mpsc::{Receiver, Sender},
+    task::JoinSet,
+};
 use tokio_stream::StreamExt;
 
 use crate::{
     event::AppEvent,
     para_wrap,
     stream::RateLimitedEventStream,
-    utils::{LONG_TIMESTAMP_FMT, try_parse_html, wrap_then_apply},
+    utils::{LONG_TIMESTAMP_FMT, Throbber, try_parse_html, wrap_then_apply},
 };
 
 use crate::debug::FpsWidget;
@@ -43,6 +50,7 @@ pub struct App {
     // app state
     should_quit: bool,
     // widgets
+    throbber: Throbber,
     feed: FeedWidget,
     // perf/debug widgets
     fps: Option<FpsWidget>,
@@ -55,6 +63,7 @@ impl Default for App {
         let (app_event_tx, app_event_rx) = tokio::sync::mpsc::channel(1);
         Self {
             should_quit: false,
+            throbber: Throbber::new(Duration::from_millis(250)),
             feed: FeedWidget::new(app_event_tx.clone()),
             fps: None,
             app_event_rx,
@@ -149,15 +158,26 @@ impl App {
             vertical![==2, *=1, ==1, ==1, ==fps_widget_h, ==fps_widget_h]
                 .areas(frame.area().inner(Margin::new(1, 1)));
 
-        let [title_area, time_area] = horizontal![==30, ==30]
-            .flex(Flex::SpaceBetween)
-            .areas(header_area);
+        let [h_left_area, h_right_area] = horizontal![==1/2, ==1/2].areas(header_area);
+
+        let app_name = env!("CARGO_PKG_NAME");
+        let app_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let title_len = (app_name.len() + app_version.len() + 1) as u16; // +1 for space
+
+        let [title_area, _, throbber_area] = horizontal![==title_len, ==1, ==1].areas(h_left_area);
+
+        if self.feed.is_loading() {
+            let tui_throbber = throbber_widgets_tui::Throbber::default()
+                .throbber_set(throbber_widgets_tui::CANADIAN);
+            self.throbber
+                .render(tui_throbber, throbber_area, frame.buffer_mut());
+        }
 
         frame.render_widget(
             line![
-                span!(env!("CARGO_PKG_NAME")).magenta().bold(),
+                span!(app_name).magenta().bold(),
                 span!(" "),
-                span!("v{}", env!("CARGO_PKG_VERSION")).blue(),
+                span!(app_version).blue()
             ]
             .left_aligned(),
             title_area,
@@ -167,7 +187,7 @@ impl App {
             line!(chrono::Local::now().format(LONG_TIMESTAMP_FMT).to_string())
                 .cyan()
                 .right_aligned(),
-            time_area,
+            h_right_area,
         );
 
         self.feed.render(frame, main_area);
@@ -200,11 +220,11 @@ impl App {
     }
 }
 
-#[derive(Clone)]
 struct FeedWidget {
     app_event_tx: Sender<AppEvent>,
 
     data: Arc<RwLock<FeedWidgetData>>,
+    loading_count: Arc<AtomicUsize>,
     http_client: Client,
 
     tb_state: TableState,
@@ -236,6 +256,7 @@ impl FeedWidget {
             app_event_tx,
             http_client,
             data: Arc::new(RwLock::new(FeedWidgetData::default())),
+            loading_count: Arc::new(AtomicUsize::new(0)),
             tb_state: TableState::default(),
             tb_cum_row_heights: Vec::new(),
             sb_state: ScrollbarState::default(),
@@ -243,51 +264,60 @@ impl FeedWidget {
         }
     }
 
-    fn run(&self, chan_urls: Vec<String>) {
-        tokio::spawn(self.clone().fetch_feed(chan_urls));
+    fn run(&mut self, chan_urls: Vec<String>) {
+        let http_client = self.http_client.clone();
+        let data = Arc::clone(&self.data);
+
+        let loading_count = Arc::clone(&self.loading_count);
+        loading_count.store(chan_urls.len(), Ordering::SeqCst);
+
+        tokio::spawn(async move {
+            let mut query_set: JoinSet<Result<Feed, Box<dyn Error + Send + Sync>>> = JoinSet::new();
+
+            for chan_url in chan_urls {
+                let local_http_client = http_client.clone();
+                query_set.spawn(async move {
+                    let http_resp = local_http_client.get(chan_url).send().await?;
+                    let http_resp_bytes = &http_resp.bytes().await?[..];
+                    match rss::Channel::read_from(http_resp_bytes) {
+                        Ok(rss_feed) => Ok(Feed::Rss(rss_feed)),
+                        Err(_) => match atom_syndication::Feed::read_from(http_resp_bytes) {
+                            Ok(atom_feed) => Ok(Feed::Atom(atom_feed)),
+                            Err(_) => Err(Box::from("Failed to parse feed")),
+                        },
+                    }
+                });
+            }
+
+            while let Some(result) = query_set.join_next().await {
+                match result {
+                    Ok(Ok(parsed_feed)) => {
+                        let new_items: Vec<_> = match parsed_feed {
+                            Feed::Atom(atom_feed) => atom_feed
+                                .entries()
+                                .iter()
+                                .filter_map(FeedItem::from_atom_entry)
+                                .collect(),
+                            Feed::Rss(rss_feed) => rss_feed
+                                .items()
+                                .iter()
+                                .filter_map(FeedItem::from_rss_item)
+                                .collect(),
+                        };
+                        let mut data = data.write().unwrap();
+                        data.items.extend(new_items);
+                        data.items.sort_by(|a, b| b.pub_date.cmp(&a.pub_date));
+                    }
+                    Ok(Err(e)) => eprintln!("Feed fetch error: {}", e),
+                    Err(e) => eprintln!("Task failed: {}", e),
+                }
+                loading_count.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
     }
 
-    async fn fetch_feed(self, chan_urls: Vec<String>) {
-        let mut query_set: JoinSet<Result<Feed, Box<dyn Error + Send + Sync>>> = JoinSet::new();
-
-        for chan_url in chan_urls {
-            let local_http_client = self.http_client.clone();
-            query_set.spawn(async move {
-                let http_resp = local_http_client.get(chan_url).send().await?;
-                let http_resp_bytes = &http_resp.bytes().await?[..];
-                match rss::Channel::read_from(http_resp_bytes) {
-                    Ok(rss_feed) => Ok(Feed::Rss(rss_feed)),
-                    Err(_) => match atom_syndication::Feed::read_from(http_resp_bytes) {
-                        Ok(atom_feed) => Ok(Feed::Atom(atom_feed)),
-                        Err(_) => Err(Box::from("Failed to parse feed")),
-                    },
-                }
-            });
-        }
-
-        while let Some(result) = query_set.join_next().await {
-            match result {
-                Ok(Ok(parsed_feed)) => {
-                    let new_items: Vec<_> = match parsed_feed {
-                        Feed::Atom(atom_feed) => atom_feed
-                            .entries()
-                            .iter()
-                            .filter_map(FeedItem::from_atom_entry)
-                            .collect(),
-                        Feed::Rss(rss_feed) => rss_feed
-                            .items()
-                            .iter()
-                            .filter_map(FeedItem::from_rss_item)
-                            .collect(),
-                    };
-                    let mut data = self.data.write().unwrap();
-                    data.items.extend(new_items);
-                    data.items.sort_by(|a, b| b.pub_date.cmp(&a.pub_date));
-                }
-                Ok(Err(e)) => eprintln!("Feed fetch error: {}", e),
-                Err(e) => eprintln!("Task failed: {}", e),
-            }
-        }
+    fn is_loading(&self) -> bool {
+        self.loading_count.load(Ordering::SeqCst) > 0
     }
 
     async fn handle_event(&mut self, event: AppEvent) {
