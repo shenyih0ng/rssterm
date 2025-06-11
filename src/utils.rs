@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
-use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::StatefulWidget};
 use textwrap::{Options, wrap};
 use throbber_widgets_tui::{Throbber as TuiThrobber, ThrobberState as TuiThrobberState};
 
 pub const LONG_TIMESTAMP_FMT: &str = "%H:%M:%S / %-e-%b-%Y [%a]";
+pub const WARM_WHITE_RGB: Color = Color::Rgb(232, 233, 240);
 
 pub(crate) fn wrap_then_apply<T>(text: &str, width: usize, apply: fn(String) -> T) -> Vec<T> {
     wrap(text, Options::new(width).break_words(true))

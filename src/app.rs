@@ -41,7 +41,7 @@ use crate::{
     event::AppEvent,
     para_wrap,
     stream::RateLimitedEventStream,
-    utils::{LONG_TIMESTAMP_FMT, Throbber, try_parse_html, wrap_then_apply},
+    utils::{LONG_TIMESTAMP_FMT, Throbber, WARM_WHITE_RGB, try_parse_html, wrap_then_apply},
 };
 
 use crate::debug::FpsWidget;
@@ -223,6 +223,8 @@ impl App {
 struct FeedWidget {
     app_event_tx: Sender<AppEvent>,
 
+    show_help: bool,
+
     data: Arc<RwLock<FeedWidgetData>>,
     loading_count: Arc<AtomicUsize>,
     http_client: Client,
@@ -255,6 +257,7 @@ impl FeedWidget {
         Self {
             app_event_tx,
             http_client,
+            show_help: false,
             data: Arc::new(RwLock::new(FeedWidgetData::default())),
             loading_count: Arc::new(AtomicUsize::new(0)),
             tb_state: TableState::default(),
@@ -265,6 +268,11 @@ impl FeedWidget {
     }
 
     fn run(&mut self, chan_urls: Vec<String>) {
+        if chan_urls.is_empty() {
+            self.show_help = true;
+            return;
+        }
+
         let http_client = self.http_client.clone();
         let data = Arc::clone(&self.data);
 
@@ -396,6 +404,26 @@ impl FeedWidget {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if self.show_help {
+            let help_para = para_wrap!(text![
+                line!["NO FEEDS FOUND"].bold(),
+                line!(),
+                line!["Add RSS/Atom URLs to the feeds file to get started"].fg(WARM_WHITE_RGB),
+                line!(),
+                line![
+                    span!("$ ").dim(),
+                    span!("echo 'https://hnrss.org/frontpage' >> $(rssterm feeds)").green()
+                ],
+            ])
+            .block(Block::default().padding(Padding {
+                top: area.height / 3,
+                ..Padding::ZERO
+            }))
+            .centered();
+
+            return frame.render_widget(help_para, area);
+        }
+
         let feed_items = &self.data.read().unwrap().items;
 
         if let Some(exp_feed_item) = self
@@ -651,8 +679,7 @@ impl ExpandedItemWidget {
                     .iter()
                     .flat_map(|l| {
                         wrap_then_apply(l, render_area.width as usize, |l| {
-                            // Custom warm white color for better readability
-                            line!(l).fg(Color::Rgb(232, 233, 240))
+                            line!(l).fg(WARM_WHITE_RGB)
                         })
                     })
                     .collect()
