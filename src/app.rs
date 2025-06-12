@@ -161,7 +161,7 @@ impl App {
         let [h_left_area, h_right_area] = horizontal![==1/2, ==1/2].areas(header_area);
 
         let app_name = env!("CARGO_PKG_NAME");
-        let app_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let app_version = format!("v{}", env!("RSSTERM_VERSION"));
         let title_len = (app_name.len() + app_version.len() + 1) as u16; // +1 for space
 
         let [title_area, _, throbber_area] = horizontal![==title_len, ==1, ==1].areas(h_left_area);
@@ -247,7 +247,7 @@ enum Feed {
 }
 
 impl FeedWidget {
-    const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
+    const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("RSSTERM_VERSION"),);
 
     fn new(app_event_tx: Sender<AppEvent>) -> Self {
         let http_client = Client::builder()

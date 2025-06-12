@@ -28,14 +28,14 @@ fn default_feeds_file() -> PathBuf {
 }
 
 #[derive(Parser)]
-#[command(version)]
+#[command(version = env!("RSSTERM_VERSION"))]
 #[command(about = "i read rss feeds on the terminal btw")]
 struct Cli {
     #[arg(long = "feeds", env = "RSSTERM_FEEDS", default_value = default_feeds_file().into_os_string())]
     feeds_file: PathBuf,
     #[arg(
         long,
-        default_value_t = 60.0,
+        default_value_t = 120.0,
         help = "Target rendering FPS (use 0 for uncapped)"
     )]
     fps: f32,
