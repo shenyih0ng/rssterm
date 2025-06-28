@@ -36,6 +36,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_stream::StreamExt;
+use url::Url;
 
 use crate::{
     event::AppEvent,
@@ -83,22 +84,33 @@ impl App {
             self.fps = Some(FpsWidget::default());
         }
 
-        self.feed.run(
-            fs::read_to_string(feeds_file)
-                .await
-                .map(|s| s.trim().lines().map(str::to_owned).collect())
-                .unwrap_or(Vec::new()),
-        );
+        let feed_urls = fs::read_to_string(feeds_file)
+            .await
+            .map(|content| {
+                content
+                    .lines()
+                    .map(str::trim)
+                    .filter_map(|line| {
+                        if !line.is_empty() {
+                            Url::parse(line).ok().map(|url| url.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        self.feed.run(feed_urls);
 
         let mut tick_rate = tokio::time::interval(tick_rate);
 
         /*
-         Currently, only scroll events (up/down/mouse scroll) are rate-limited to 15ms
-         The logic for determining whether an event should be rate-limited is in the `RateLimitedEventStream`
+         Currently, only scroll events (up/down/mouse scroll) are rate-limited to 15ms.
+         The logic for determining whether an event should be rate-limited is in the `RateLimitedEventStream`.
 
-         The chosen delay ensures that scroll events are still buttery-smooth at a FPS of 1s/15ms = 66.67 FPS,
-         while also preventing scroll event flooding when the user scrolls too fast (especially those with
-         a mx master mouse wheel that scrolls blazingly fast - myself included).
+         Delay of 15ms maintains smooth scrolling (1s/15ms = 66.67 FPS) while preventing event flooding
+         from high-sensitivity mice (e.g. MX Master's fast scroll wheel).
         */
         let mut term_events = RateLimitedEventStream::new(Duration::from_millis(15));
 

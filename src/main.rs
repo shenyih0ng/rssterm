@@ -7,10 +7,13 @@ use ratatui::crossterm::terminal::{
 use ratatui::prelude::CrosstermBackend;
 use std::env::home_dir;
 use std::error::Error;
+use std::fs::{self};
+use std::io::{Read, Write};
 use std::panic::{set_hook, take_hook};
 use std::path::PathBuf;
 use std::time::Duration;
 use std::{f32, io};
+use url::Url;
 
 mod app;
 mod debug;
@@ -47,6 +50,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Add a new RSS/Atom feed")]
+    Add {
+        #[arg(value_parser=Url::parse, help="URL of the RSS/Atom feed (e.g. https://hnrss.org/frontpage)")]
+        url: Url,
+    },
+    #[command(about = "Path to feeds file")]
     Feeds,
 }
 
@@ -54,9 +63,28 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
-    if matches!(args.command, Some(Commands::Feeds)) {
-        println!("{}", args.feeds_file.display());
-        return Ok(());
+    match args.command {
+        Some(Commands::Feeds) => {
+            println!("{}", args.feeds_file.display());
+            return Ok(());
+        }
+        Some(Commands::Add { url }) => {
+            let mut feeds_file = fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(args.feeds_file.clone())?;
+            let mut feed_urls = String::new();
+            feeds_file.read_to_string(&mut feed_urls)?;
+            if feed_urls.lines().any(|line| line.trim() == url.as_str()) {
+                eprintln!("{url} is already there!");
+                return Ok(());
+            }
+            // Add a new line
+            feeds_file.write(format!("\n{}", url).as_bytes())?;
+            println!("Added feed: {}", url);
+            return Ok(());
+        }
+        _ => {}
     }
 
     let tick_rate = if args.fps == 0.0 {

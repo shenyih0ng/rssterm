@@ -23,6 +23,7 @@ directories = "6.0.0"
 throbber-widgets-tui = "0.8.0"
 termios = { version = "0.3.3", optional = true }
 rand = { version = "0.9.1", optional = true }
+url = "2.5.4"
 
 [features]
 fun = ["dep:termios", "dep:rand"]
